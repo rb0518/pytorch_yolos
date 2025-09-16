@@ -178,3 +178,81 @@ void plot_images(torch::Tensor images, torch::Tensor targets,
         cv::waitKey();
     }
 }
+
+void plot_images_pred(torch::Tensor images, std::vector<torch::Tensor> preds,
+    std::string path, std::string fname,
+    bool normalise /*= false*/,
+    std::vector<std::string> names /*= {}*/,
+    int max_subplots /*= 16*/)
+{
+    int batch_size = images.size(0);
+    int img_width = images.size(3);
+    int img_height = images.size(2);
+    int channels = images.size(1);
+
+    if (channels != 1 && channels != 3)
+    {
+        LOG(WARNING) << "only support channels as 1 or 3. program will do nothing.";
+        return;
+    }
+
+    bool is_mono = channels == 1 ? true : false;
+    if (normalise)
+        images = images * 255.f;
+
+    cv::Mat mat_mosaic = cv::Mat(img_height * 2, img_width * 2, CV_8UC3);
+
+    for (int i = 0; i < std::min(max_subplots, batch_size); i++)
+    {
+        auto img = images[i];
+        auto mat_one = convert_tensor_to_mat(img, img_width, img_height, channels);
+
+        plot_pred(mat_one, preds[i], names);
+
+        cv::resize(mat_one, mat_one, cv::Size(img_width / 2, img_height / 2));
+        int row_id = i % 4;
+        int col_id = i > row_id ? (i - row_id) / 4 : 0;
+        auto y1 = row_id * (img_height / 2);
+        auto x1 = col_id * (img_width / 2);
+        cv::Mat roi = mat_mosaic(cv::Rect(x1, y1, img_width / 2, img_height / 2));
+        mat_one.copyTo(roi);
+    }
+
+    if (fname != "")
+    {
+        auto img_save_name = std::filesystem::path(path).append(fname).string();
+        cv::imwrite(img_save_name, mat_mosaic);
+    }
+    else
+    {
+        cv::imshow("test", mat_mosaic);
+        cv::waitKey();
+    }
+}
+
+void plot_pred(cv::Mat& img, torch::Tensor pred, std::vector<std::string> names, int line_thickness/* = 3*/)
+{
+    int img_width = img.cols;
+    int img_height = img.rows;
+
+    int nt = pred.size(0);
+    for (int t = 0; t < pred.size(0); t++)
+    {
+        auto label = pred[t];
+        auto x1 = label[0].item().toFloat();
+        auto y1 = label[1].item().toFloat();
+        auto x2 = label[2].item().toFloat();
+        auto y2 = label[3].item().toFloat();
+        auto score = label[4].item().toFloat();
+        auto cls_id = label[5].item().toInt();
+
+        auto typecolor = SingletonColors::getInstance()->get_color_scalar(cls_id);
+
+        cv::rectangle(img, cv::Point(int(x1), int(y1)), cv::Point(int(x2), int(y2)), typecolor, 2);
+
+        std::stringstream ss;
+        ss << names[cls_id] << " " << std::to_string(score);
+        cv::putText(img, ss.str(), cv::Point(x1, std::max(0, int(y1) - 2)), cv::FONT_HERSHEY_PLAIN, 1.,
+            typecolor, 2);
+    }
+}

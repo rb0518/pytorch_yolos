@@ -148,8 +148,8 @@ void DetectImpl::check_anchor_order()
     auto da = flat_anchors[flat_anchors.size()-1] - flat_anchors[0];
     auto ds = stride[stride.size(0)-1].item().toFloat() - stride[0].item().toFloat();
 
-    for(int i = 0; i < stride.size(0); i++)
-        std::cout << i << " " << stride[i].item().toInt() << std::endl;
+    // for(int i = 0; i < stride.size(0); i++)
+    //     std::cout << i << " " << stride[i].item().toInt() << std::endl;
 
     if ((da * ds) < 0)
     {

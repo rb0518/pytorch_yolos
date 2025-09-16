@@ -30,14 +30,18 @@ def test(data,
 #include "datasets.h"
 
 void test(
-    std::shared_ptr<Model> model,
-    std::string root_,
-    VariantConfigs opt,
-    std::string data_cfg,
+    std::shared_ptr<Model> model,   // model or nullpytr
+    std::string root_,          
+    VariantConfigs opt,             // opt 
+    std::vector<std::string> cls_names,
+    std::shared_ptr<LoadImagesAndLabels> val_datasets, // if not val, set = nullptr
+    std::string val_path,
+    std::string save_dir_,
     std::string weights = "",
-    int imgsz =640,
+    int nc = 80,
+    int imgsz = 640,
     int batch_size=32,
     float conf_thres = 0.001f,
     float iou_thres = 0.6f,
-    std::shared_ptr<LoadImagesAndLabels> val_datasets = nullptr
+    bool save_pred = false
 );

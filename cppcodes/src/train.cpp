@@ -20,7 +20,7 @@
 
 #include "test.h"
 #ifdef WIN32
-void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../../data/images/bus.jpg");
+void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../data/images/bus.jpg");       // Working Directory = ${ProjectDir}
 #else
 void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../data/images/bus.jpg");
 #endif
@@ -36,6 +36,34 @@ std::tuple<std::string, std::string, std::string> create_dirs(const std::string 
 
     return std::make_tuple(last, best, results_file);
 }
+
+void save_checkpoint(std::string filename, torch::nn::Module* model,
+    std::shared_ptr<torch::optim::Optimizer> optimizer, int epoch)
+{
+    torch::serialize::OutputArchive ckpt_out;
+
+    torch::serialize::OutputArchive model_out;
+    model->save(model_out);
+    ckpt_out.write("model", model_out);
+    torch::serialize::OutputArchive optim_out;
+#if 0
+    optimizer->save(optim_out);
+#else   // 保持与pytorch中pt一致
+    int pg_size = optimizer->param_groups().size();
+    optim_out.write("size", torch::tensor(pg_size));
+    for (int i_pg = 0; i_pg < optimizer->param_groups().size(); i_pg++)
+    {
+        torch::serialize::OutputArchive tmp_pg;
+        optimizer->param_groups()[i_pg].options().serialize(tmp_pg);
+        optim_out.write("param_groups/" + std::to_string(i_pg), tmp_pg);
+    }
+#endif
+    ckpt_out.write("optim", optim_out);
+
+    ckpt_out.write("epoch", torch::tensor(epoch));
+    ckpt_out.save_to(filename);
+}
+
 /*
 std::function<float(float)> one_cycle(float y1, float y2, int steps) {
     return [y1, y2, steps](float x) {
@@ -166,7 +194,7 @@ void train(const std::string& _root,
             auto jit_file = std::filesystem::path(_root).append(jit_script_file).string();
             std::cout << "load pretrained jit script file:" << jit_file << std::endl;
             LoadWeightFromJitScript(jit_file, *model, true);
-            std::cout << " pretrain weight..." << std::endl; 
+            // std::cout << " pretrain weight..." << std::endl; 
         }
         else{
             std::cout << "load " << std::filesystem::path(_root).append(jit_script_file).string() << "not exist." << std::endl;
@@ -257,7 +285,7 @@ void train(const std::string& _root,
     std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
     if (std::get<bool>(opt["adam"]))
     {
-        std::cout << "optimizer use Adam" << " lr0 " << lr0 << std::endl;
+        //std::cout << "optimizer use Adam" << " lr0 " << lr0 << std::endl;
         auto adam_option = torch::optim::AdamOptions(lr0).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
         optimizer = std::make_shared<torch::optim::Adam>(
             pg2, adam_option);
@@ -281,7 +309,7 @@ void train(const std::string& _root,
     }
     else
     {   // default at here -- opt.adam : false
-        std::cout << "optimizer use SGD" << " lr0 " << lr0 << std::endl;
+        // std::cout << "optimizer use SGD" << " lr0 " << lr0 << std::endl;
         optimizer = std::make_shared<torch::optim::SGD>(
             pg2, torch::optim::SGDOptions(lr0)
             .momentum(momentum)
@@ -380,24 +408,18 @@ void train(const std::string& _root,
     */
     bool augment = true;
     bool rect = std::get<bool>(opt["rect"]);
-    std::cout << "rect " << rect << std::endl;
     bool image_weights = std::get<bool>(opt["image_weights"]);
-    std::cout << "image_weights " << image_weights << std::endl;
     bool cache_images = std::get<bool>(opt["cache_images"]);
-    std::cout << "cache_images " << cache_images << std::endl;
     float pad = 0.0f;
-    std::cout << "create dataset...." << std::endl;
 #if 1 
     std::shared_ptr<LoadImagesAndLabels> load_dataset = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
                 rect, image_weights, cache_images, nc == 1, gs, pad, "");
     auto datasets = load_dataset->map(torch::data::transforms::Stack<>());
 
-    std::cout << " create datasets:  LoadImagesAndLabels over ...." << std::endl;
     auto total_images = datasets.size();
     int num_images = 0;
     if (total_images.has_value())
         num_images = *total_images;
-    LOG(INFO) << "create training dataset, total images: " << num_images;
     auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
     auto dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(datasets), dataloader_options);
@@ -534,8 +556,7 @@ void train(const std::string& _root,
                     }
                 }
             }
-
-            
+           
             // multi-scale
             if (std::get<bool>(opt["multi_scale"]))
             {   // ???暂时未完成
@@ -584,22 +605,35 @@ void train(const std::string& _root,
 
         scheduler.step();
         std::cout << std::endl;
-        if (0)
+        if (false == std::get<bool>(opt["notest"]))
         {  // mAP
-            bool final_epoch = (epoch + 1) == epochs;
-            //if (!std::get<bool>(opt["notest"]) || final_epoch)
-            {
-                test(ptr_model,//ema.ema_model_,
-                    _root,
-                    opt,
-                    std::get<std::string>(opt["data"]),
-                    "",
-                    imgsz, 32, 0.2f, 0.45f, val_dataset
-                    );
-            }
+            bool save_flag = (epoch == start_epoch) ? true : false;
+            test(ptr_model,//ema.ema_model_,
+                _root,
+                opt,
+                names,
+                val_dataset,
+                "",
+                save_dir,
+                "",
+                80, 
+                imgsz, 32, 0.2f, 0.45f,
+                save_flag);
         }
         
-        if(0 == ((epoch + 1) % 10) || num_images > 1000){
+        // 像coco.yaml数据集非常大，每轮训练都超过50分钏以上，如果只在最后一次保存，可能丢失训练时间太多了, 强制每次保存
+        bool save_flag = num_images > 1000 ? true : false;
+        if(false == save_flag)
+        {
+            int save_period = std::get<int>(opt["save_period"]);
+            if( false == std::get<bool>(opt["nosave"]) && save_period > 0)
+                if(((epoch + 1) % save_period) == 0)
+                    save_flag = true;
+        }
+
+        if(save_flag){   
+            //model->to(torch::kCPU);
+            /*
             auto save_checkpoint = [&](std::string filename) {
                     torch::serialize::OutputArchive ckpt_out;
 
@@ -625,12 +659,30 @@ void train(const std::string& _root,
 //                    auto ckpt_name = std::filesystem::path(filename).parent_path().append("ckpt.pt").string();
                     ckpt_out.save_to(filename);
                 };
-            //model->to(torch::kCPU);
-            save_checkpoint(last);
+            */
+            save_checkpoint(last, model, optimizer, epoch);
         }
     } // end epochs
 
-    test_model(ptr_model);
+    save_checkpoint(last, model, optimizer, epochs-1);
+
+    if (true == std::get<bool>(opt["notest"]))
+    {  //
+        auto weight_rel = std::filesystem::relative(last, std::filesystem::path(_root)).string();
+        test(nullptr,//ema.ema_model_,
+            _root,
+            opt,
+            names,
+            val_dataset,
+            "",
+            save_dir,
+            weight_rel,
+            80, 
+            imgsz, 32, 0.2f, 0.45f, true
+            );
+    }
+    else
+        test_model(ptr_model);  // 测试代码
 }
 
 void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= "../../data/images/bus.jpg"*/)

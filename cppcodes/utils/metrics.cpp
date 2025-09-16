@@ -121,23 +121,30 @@ torch::Tensor process_batch(torch::Tensor& detections, torch::Tensor& labels, to
     auto x = torch::where((iou >= iouv[0]) & (
         labels.index({torch::indexing::Slice(), torch::indexing::Slice(0, 1)}) ==
         detections.index({torch::indexing::Slice(), 5})));
+
+    //std::cout << "process_batch x " << x.size() << std::endl;
     if(x[0].size(0))
     {
         auto x_stack = torch::stack(x, 1);
+        //std::cout << x_stack.device().type() << " " << x_stack.sizes() << std::endl;
         auto iou_ind = iou.index({ x[0], x[1] }).index({ torch::indexing::Slice(), torch::indexing::None });
-        auto matches = torch::cat({ x_stack, iou_ind }, 1).to(torch::kCPU);
+        //std::cout << iou_ind.sizes() << std::endl;
 
+        auto matches = torch::cat({ x_stack, iou_ind }, 1).to(iouv.device());
+        //std::cout << "matches: " << matches.sizes() << " x0.shape[0] " << x[0].size(0) << std::endl;
         if (x[0].size(0) > 1)
         {
-
-            matches = matches.index({ matches.index({ torch::indexing::Slice(), 2 }).argsort().index(
-                { torch::indexing::Slice(torch::indexing::None, torch::indexing::None, -1) }
-                    ) });
+            // python 原码：matches = matches[matches[:, 2].argsort()[::-1]]
+            auto sorted_indices = torch::argsort(matches.index({ torch::indexing::Slice(), 2 }));
+            sorted_indices = torch::flip(sorted_indices, /*dim=*/0);
+            matches = matches.index({ sorted_indices });
             //  matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+
             auto col1 = matches.index({ torch::indexing::Slice(), 1 });
             auto unique_result = torch::_unique2(col1, true, false, false);
             auto unique_indices = std::get<1>(unique_result);
             matches = matches.index_select(0, unique_indices);
+//            std::cout << "matches: " << matches.sizes() << std::endl;
             //  matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
             auto col2 = matches.index({ torch::indexing::Slice(), 0 });
             unique_result = torch::_unique2(col2, true, false, false);
@@ -146,9 +153,9 @@ torch::Tensor process_batch(torch::Tensor& detections, torch::Tensor& labels, to
         }
 
         matches = matches.to(iouv.device());
-
-        correct = correct.to(torch::kLong);
         auto iouv_filter = matches.index({ torch::indexing::Slice(), torch::indexing::Slice(2, 3) }) >= iouv;
+        //std::cout << matches.sizes() << " iou_filter: " << iouv_filter.sizes() << std::endl;
+        matches = matches.to(torch::kLong);
         correct.index_put_({ matches.index({torch::indexing::Slice(), 1}) }, iouv_filter);
     }
     return correct;

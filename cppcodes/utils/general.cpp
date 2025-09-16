@@ -6,7 +6,7 @@ std::string get_root_path_string()
 {
     std::filesystem::path exe_path = std::filesystem::absolute(std::filesystem::current_path());
 #ifdef WIN32
-    std::string root_path = exe_path.parent_path().parent_path().parent_path().string(); //windows: ../cppcodes/build/Release
+    std::string root_path = exe_path.parent_path().parent_path().string(); //windows: ../cppcodes/build/Release, 如果设置Working dirctory = ${projectDir}, 就与Linux下一样
 #else
     std::string root_path = exe_path.parent_path().parent_path().string();              //linux:  ../cppcodes/build
 #endif

@@ -8,6 +8,8 @@
 #include "metrics.h"
 #include "progressbar.h"
 
+#include "plots.h"
+
 #include "metrics.h"
 
 torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, std::vector<float> img0_shape,
@@ -17,7 +19,7 @@ torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, 
     float gain;
     if (ratio_pad.size() == 0)
     {
-        gain = std::min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[0]);
+        gain = std::min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1]);
         pad.push_back((img1_shape[1] - img0_shape[1] * gain) / 2);
         pad.push_back((img1_shape[0] - img0_shape[0] * gain) / 2);
     }
@@ -26,84 +28,111 @@ torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, 
         gain = ratio_pad[0][0];
         pad = ratio_pad[1];
     }
-
-    coords.index_put_({ torch::indexing::Slice(), 0 },
+    //std::cout << "gain: " << gain << " pad: " << pad[0] << " " << pad[1] << std::endl;
+    auto ret = torch::empty_like(coords);
+    ret.index_put_({ torch::indexing::Slice(), 0 },
         coords.index({ torch::indexing::Slice(), 0 }) - pad[0]);
-    coords.index_put_({ torch::indexing::Slice(), 2 },
+    ret.index_put_({ torch::indexing::Slice(), 2 },
         coords.index({ torch::indexing::Slice(), 2 }) - pad[0]);
-    coords.index_put_({ torch::indexing::Slice(), 1 },
+    ret.index_put_({ torch::indexing::Slice(), 1 },
         coords.index({ torch::indexing::Slice(), 1 }) - pad[1]);
-    coords.index_put_({ torch::indexing::Slice(), 3 },
+    ret.index_put_({ torch::indexing::Slice(), 3 },
         coords.index({ torch::indexing::Slice(), 3 }) - pad[1]);
 
-    return coords.index({ torch::indexing::Slice(), torch::indexing::Slice(0, 4)}).div(gain);
+    return ret = ret / gain;
 }
 
 
 void test(
-    std::shared_ptr<Model> model,
-    std::string root_,
-    VariantConfigs opt,
-    std::string data_cfg,
+    std::shared_ptr<Model> model,   // model or nullpytr
+    std::string root_,          
+    VariantConfigs opt,             // opt 
+    std::vector<std::string> cls_names,
+    std::shared_ptr<LoadImagesAndLabels> val_datasets, // if not val, set = nullptr
+    std::string val_path,
+    std::string save_dir_,
     std::string weights /*= ""*/,
-    int imgsz /*= 640*/,
-    int batch_size/* = 32*/,
+    int nc/* = 80*/,
+    int imgsz/* =640*/,
+    int batch_size/*=32*/,
     float conf_thres/* = 0.001f*/,
-    float iou_thres /*= 0.6f*/,
-    std::shared_ptr<LoadImagesAndLabels> val_datasets
-    )
+    float iou_thres/* = 0.6f*/,
+    bool save_pred /* = false*/
+)
 {
-    bool training = model != nullptr ? true : false;
+    bool is_training = model != nullptr ? true : false;
     auto device = torch::cuda::is_available() ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
-
-    std::string save_dir;
-
-    if(training)
+    ModelImpl* model_ptr;
+    std::shared_ptr<Model> model_tmp; 
+    std::string save_dir = save_dir_;
+    if(is_training)
     {
-        device = (*model)->parameters().begin()->device();
+        model_ptr = model->get();
+        device = model_ptr->parameters().begin()->device();
+
         //if (device.type() == torch::kCPU)
         //    std::cout << "device == torch::kCPU " << std::endl;
         //std::cout << "device == torch::kCUDA" << std::endl;
     }
     else
     {   //不是从train.cpp中调用，需要读取环境变量，初始化Model，并加载weights
-        
-        //save_dir = increment_path()
+        if(false == std::filesystem::exists(std::filesystem::path(save_dir)))
+        {
+            std::string strtmp = std::filesystem::path(root_)
+                        .append(std::get<std::string>(opt["project"]))
+                        .append(std::get<std::string>(opt["name"])).string();
+            save_dir = increment_path(strtmp);
+        }
+        std::cout << "save dir: " << save_dir << std::endl;
+
+        auto cfg_file = std::filesystem::path(root_).append(std::get<std::string>(opt["cfg"])).string();
+        std::cout << "cfg_file: " << cfg_file << std::endl;
+        if(false == std::filesystem::exists(std::filesystem::path(cfg_file)))
+        {
+            LOG(ERROR) << "cfg_file: " << cfg_file << " not exist." ;
+            return;
+        }
+        std::string weights_file = std::filesystem::path(root_).append(weights).string();
+        if(false == std::filesystem::exists(weights_file))
+        {
+            LOG(ERROR) << "weights file: " << weights << " not exist." ;
+            return;
+        }
+        model_tmp = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false);
+        model_ptr = model_tmp->get();
+        torch::serialize::InputArchive ckpt_in;
+        ckpt_in.load_from(weights_file); // model optim epoch
+        torch::serialize::InputArchive model_in;
+        if (ckpt_in.try_read("model", model_in))
+        {
+            model_ptr->load(model_in);
+            std::cout << "load " << weights_file << " over..." << std::endl;
+        }
+        else
+        {
+            LOG(ERROR) << "*** Load weight error! ";
+            return;
+        }
     }
-
-    (*model)->eval();
-
+    
+    model_ptr->eval();
+    std::cout << "Model create over..." << std::endl;
     torch::Tensor iouv = torch::linspace(0.5, 0.95, 10);
     iouv = iouv.to(device);
     auto niou = iouv.numel();
 
-    YAML::Node data_dict;
-    std::filesystem::path data_yaml = std::filesystem::path(root_).append(data_cfg);
-    if (std::filesystem::exists(data_yaml))
-    {
-        // ???后期需要进行专项修改，因为data yaml中有两种格式，采取map和list
-        data_dict = YAML::LoadFile(data_yaml.string());
-        //std::cout << "Load data file: " << data_cfg << std::endl;
-    }
-    else
-    {
-        LOG(ERROR) << "not found you offer data yaml file: " << data_cfg;
-    }
-    auto is_coco = data_cfg.substr(data_cfg.length() - 10, data_cfg.length() - 1) == "coco.yaml";
-    auto nc = std::get<bool>(opt["single_cls"]) == true ? 1 : data_dict["nc"].as<int>();
-
-    VariantConfigs hyp;
-    std::string train_path;
     std::shared_ptr<LoadImagesAndLabels> val_load_datasets=nullptr;
-    if(training == false)
+    if(val_datasets == nullptr)
     {
+        std::cout << "val path: " << val_path << std::endl;
+        VariantConfigs hyp = set_cfg_hyp_default();
         bool augment = false;
         bool rect = true;
         bool image_weights = false;
         bool cache_images = false;
         int gs = 32;
         float pad = 0.5f;
-        val_load_datasets = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
+        val_load_datasets = std::make_shared<LoadImagesAndLabels>(val_path, hyp, imgsz, batch_size, augment,
             rect, image_weights, cache_images, nc == 1, gs, pad, "");
         std::cout << " create val datasets:  LoadImagesAndLabels over ...." << std::endl;
     }
@@ -120,33 +149,21 @@ void test(
     auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
     auto val_dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(test_datasets), dataloader_options);
-    //std::cout << "init dataloader over..." << std::endl;
-    if (training == false)
+    std::cout << "init dataloader over..." << std::endl;
+    if (is_training == false)
     {
         auto tmp_tenosr = torch::zeros({ 1, 3, imgsz, imgsz }).to(device).to(torch::kFloat);
-        (*model)->forward(tmp_tenosr);
+        model_ptr->forward(tmp_tenosr);
     }
 
     int seen = 0;
     //auto confusion_matrix = ConfusionMatrix(nc);
 
-    //float p = 0.f;
-    //float r = 0.f;
-    //float mp = 0.f;
-    //float mr = 0.f;
-    //float map50 = 0.f;
-    //float map = 0.f;
-    //float t0 = 0.f;
-    //float t1 = 0.f;
-
     auto loss = torch::zeros({ 3 }).to(device);
 
-//    std::vector<torch::Tensor> jdict, ap, ap_class;
     std::vector<std::vector<torch::Tensor>> stats;
-    //std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, std::vector<float>>> stats;
     int batch_i = 0;
     progressbar pbar(num_images/batch_size, 36);
-    //std::cout << "start testing..." << std::endl;
     for (auto batch : *val_dataloader)
     {
         auto img = batch.data;
@@ -176,7 +193,18 @@ void test(
         torch::NoGradGuard nograd;
         torch::Tensor out;
         std::vector<torch::Tensor> train_out;
-        std::tie(out, train_out) = (*model)->forward(img);
+        std::tie(out, train_out) = model_ptr->forward(img);
+        if (save_pred)
+        {
+            if (batch_i < 3)
+            {
+                std::string save_name = "batch_val_label_" + std::to_string(batch_i) + ".jpg";
+                plot_images(img.clone().to(torch::kCPU), targets.clone().to(torch::kCPU), save_dir, save_name, true, cls_names);
+            }
+        }
+        //std::cout << "out: " << out.sizes() << std::endl;
+
+
         // Compute loss
         // auto [tmp_loss, tmp_lossitems]= compute_loss(train_out, targets);
         // loss += tmp_lossitems.index({torch::indexing::Slice(0, 3)});
@@ -191,16 +219,24 @@ void test(
         for(int i = 0; i < img.size(0); i++)
         {
             auto selected = get_onebatchlabels(targets, i);
-            // auto mask = targets.index({torch::indexing::Slice(), 0}) == i;
-            // auto selected = targets.index({mask, torch::indexing::Slice(1, torch::indexing::None)});
             lb.push_back(selected);
         }
         std::vector<torch::Tensor> out_vc = non_max_suppression(out, conf_thres, iou_thres, {}, 
             false, true, /*lb*/{});
+
+        if (save_pred)
+        {
+            if (batch_i < 3)
+            {
+                std::string save_name = "batch_val_pred_" + std::to_string(batch_i) + ".jpg";
+                plot_images_pred(img.clone().to(torch::kCPU), out_vc, save_dir, save_name, true, cls_names);
+            }
+        }
+
         for (int i = 0; i < out_vc.size(); i++)
         {
             // 筛选出对应的labels;
-            auto labels = lb[i];
+            auto labels = lb[i].to(device);
             auto nl = labels.size(0);
             std::vector<float> tcls;
             if (nl) {
@@ -212,8 +248,8 @@ void test(
             }
             seen += 1;
 
-            if(out_vc[i].size(0) != 0)
-                std::cout << i << " out_vc: " << out_vc[i].size(0) << out_vc[i].sizes() << std::endl;
+            //if(out_vc[i].size(0) != 0)
+            //    std::cout << i << " out_vc: " << out_vc[i].size(0) << out_vc[i].sizes() << std::endl;
 
             if (out_vc[i].size(0) == 0)
             {
@@ -231,31 +267,35 @@ void test(
             //if (single_cls)
             //    out_vc[i].index_put_({ torch::indexing::Slice(), 5 }, 0);
             auto predn = out_vc[i].clone().to(device);
-            auto r_scale_coords =scale_coords(std::vector<float>({ float(img[i].size(1)), float(img[i].size(2)) }),
+            // std::cout << predn.dtype() << predn.device().type() << " " << std::endl;
+            auto r_scale_coords = scale_coords(std::vector<float>({ float(width), float(height)}),
                 predn.index({ torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, 4) }),
-                std::vector<float>({ float(img[i].size(1)), float(img[i].size(2))}),
+                std::vector<float>({ float(width), float(height)}),
                 std::vector<std::vector<float>>({{1.f, 1.f}, {0.f, 0.f}})
                 );
                 predn.index_put_({ torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, 4) }, r_scale_coords);
-            std::cout << " predn :"<< predn.sizes() << std::endl;
+            //std::cout << " predn :"<< predn.sizes() << std::endl;
             
             // Evaluate
             torch::Tensor correct;
             if (nl)
             {
                 auto tbox = xywh2xyxy(labels.index({torch::indexing::Slice(),
-                    torch::indexing::Slice(1, 5)}));
+                    torch::indexing::Slice(1, 5)})).to(device);
                 //std::cout << nl << " tbox: "  << tbox.sizes() << std::endl;
 
-                tbox = scale_coords(std::vector<float>({ float(img[i].size(1)), float(img[i].size(2)) }),
+                auto tbox_scale = scale_coords(std::vector<float>({float(width), float(height)}),
                     tbox,
-                    std::vector<float>({float(img[i].size(1)), float(img[i].size(2))}),
+                    std::vector<float>({float(width), float(height)}),
                     std::vector<std::vector<float>>({ {1.f, 1.f}, {0.f, 0.f} })
                 );
-
+                tbox = tbox_scale;
+                //std::cout << "tobx: " << tbox.dtype() << " " << tbox.device().type() << std::endl;
+                //std::cout << "labels: " << labels.dtype() << " " << labels.device().type() << std::endl;
                 auto labelsn = torch::cat({ labels.index({torch::indexing::Slice(),
                     torch::indexing::Slice(0, 1)}), tbox}, 1).to(device);
                 predn = predn.to(device);
+                //std::cout << labelsn.sizes() << std::endl;
                 correct = process_batch(predn, labelsn, iouv);
                 //if (plots)
                 //    confusion_matrix.process_batch(predn, labelsn);
@@ -277,12 +317,6 @@ void test(
             //     << tcls.size() << std::endl;
 
             // Save/log
-        }
-
-        // plot images
-        if (batch_i < 3)
-        {
-
         }
 
         batch_i += 1;
@@ -329,7 +363,7 @@ void test(
         //std::cout << "after ap_per_class " << nt.sizes() << " map50: " << map50.sizes() << " map " << map.sizes() << std::endl;
     }
     char temp_strs[250];
-    sprintf(temp_strs, "  all:%d %d mp: %8.4f mr: %8.4f map50 %8.4f map %8.4f",
+    sprintf(temp_strs, "   All:%d %d mP: %8.4f mR: %8.4f mAP50 %8.4f mAP %8.4f",
         seen, nt.sum().item().toInt(), mp.item().toFloat(), mr.item().toFloat(),
         map50.item().toFloat(), map.item().toFloat());
     std::string result_str = std::string(temp_strs);

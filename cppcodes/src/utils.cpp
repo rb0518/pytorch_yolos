@@ -360,7 +360,7 @@ std::vector<torch::Tensor> non_max_suppression(
 
         // run cv::dnn::NMSBoxes
         std::vector<int> nms_indices;
-        cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres * 0.001f, iou_thres, nms_indices);
+        cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres, iou_thres, nms_indices);
 //        std::cout << "After cv::dnn::NMSBoxes: " << nms_indices.size() << std::endl;
 
         // 构造返回函数，压入vector
