@@ -150,7 +150,6 @@ void plot_images(torch::Tensor images, torch::Tensor targets,
         images = images * 255.f;
 
     cv::Mat mat_mosaic = cv::Mat(img_height * 2, img_width * 2, CV_8UC3);
-
     for (int i = 0; i < std::min(max_subplots, batch_size); i++)
     {
         auto img = images[i];

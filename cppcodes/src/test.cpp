@@ -116,7 +116,8 @@ void test(
     }
     
     model_ptr->eval();
-    std::cout << "Model create over..." << std::endl;
+    if(false == is_training)
+        std::cout << "Model create over..." << std::endl;
     torch::Tensor iouv = torch::linspace(0.5, 0.95, 10);
     iouv = iouv.to(device);
     auto niou = iouv.numel();
@@ -149,7 +150,8 @@ void test(
     auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
     auto val_dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(test_datasets), dataloader_options);
-    std::cout << "init dataloader over..." << std::endl;
+    if(false == is_training)                
+        std::cout << "init dataloader over..." << std::endl;
     if (is_training == false)
     {
         auto tmp_tenosr = torch::zeros({ 1, 3, imgsz, imgsz }).to(device).to(torch::kFloat);
@@ -363,7 +365,7 @@ void test(
         //std::cout << "after ap_per_class " << nt.sizes() << " map50: " << map50.sizes() << " map " << map.sizes() << std::endl;
     }
     char temp_strs[250];
-    sprintf(temp_strs, "   All:%d %d mP: %8.4f mR: %8.4f mAP50 %8.4f mAP %8.4f",
+    sprintf(temp_strs, "   All: %d %d mP: %7.5f mR: %7.5f mAP50 %7.5f mAP %7.5f",
         seen, nt.sum().item().toInt(), mp.item().toFloat(), mr.item().toFloat(),
         map50.item().toFloat(), map.item().toFloat());
     std::string result_str = std::string(temp_strs);

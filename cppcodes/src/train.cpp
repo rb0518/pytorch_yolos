@@ -167,7 +167,7 @@ void train(const std::string& _root,
         std::filesystem::exists(std::filesystem::path(_root).append(weights));
     auto imgsz = std::get<std::vector<int>>(opt["img_size"])[0];//auto imgsz = 
     auto imgsz_test = std::get<std::vector<int>>(opt["img_size"])[1];
-    std::cout << "imgsz: " << imgsz << " imgsz_test: " << imgsz_test << std::endl;
+//    std::cout << "imgsz: " << imgsz << " imgsz_test: " << imgsz_test << std::endl;
 
     auto cfg_file = std::get<std::string>(opt["cfg"]);
     if(cfg_file=="")
@@ -181,6 +181,7 @@ void train(const std::string& _root,
     // onst std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo
     std::shared_ptr<Model> ptr_model = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false); // data_dict["anchors"].as<std::vector<float>>());
     auto model = ptr_model->get();
+    model->show_modelinfo();
     model->to(device);
 
     bool resume_load_ok = false;
@@ -189,19 +190,19 @@ void train(const std::string& _root,
     float last_lr = std::get<float>(hyp["lr0"]);
     torch::serialize::InputArchive ckpt_in;
     if(jit_script_file!= ""){
+        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << jit_script_file << std::endl;
         if(std::filesystem::exists(std::filesystem::path(_root).append(jit_script_file)))
         {
             auto jit_file = std::filesystem::path(_root).append(jit_script_file).string();
-            std::cout << "load pretrained jit script file:" << jit_file << std::endl;
             LoadWeightFromJitScript(jit_file, *model, true);
-            // std::cout << " pretrain weight..." << std::endl; 
         }
         else{
-            std::cout << "load " << std::filesystem::path(_root).append(jit_script_file).string() << "not exist." << std::endl;
+            LOG(WARNING) << "load " << std::filesystem::path(_root).append(jit_script_file).string() << "not exist.";
         }
     }
     else if(std::get<bool>(opt["resume"]) && pretrained)
     {
+        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << weights;
         std::string ckpt_path = std::filesystem::path(_root).append(weights)./*parent_path().append("ckpt.pt").*/string();
         ckpt_in.load_from(ckpt_path); // model optim epoch
         torch::serialize::InputArchive model_in;
@@ -212,7 +213,13 @@ void train(const std::string& _root,
 
             resume_load_ok = true;
         }
-        std::cout << " pretrain model load weight over..." << std::endl;
+        if(resume_load_ok) 
+            std::cout << " Over. " << std::endl;
+        else
+            std::cout << " wrong..." << std::endl;
+    }
+    else{
+        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << "None" << std::endl;
     }
 
     std::string train_path;
@@ -241,7 +248,7 @@ void train(const std::string& _root,
     train_path = delete_end_backslash(train_path);  
     test_path = delete_end_backslash(test_path);
 
-    std::vector<std::string> freeze;    //原代码这里也没有处理初始化队列
+    std::vector<std::string> freeze;    //原代码这里也没有处理初始化队列, 应该对应的是opt["freeze"]的层数
     for (auto p : model->named_parameters())
     {
         p.value().requires_grad_(true);
@@ -269,7 +276,6 @@ void train(const std::string& _root,
         for (auto pair : module.value()->named_parameters())
         {
             //std::cout << pair.key() <<": " << module.key() << " " << module.value()->name() << std::endl;
-
             if (pair.key().find(".bias") != std::string::npos) // no decay
                 pg2.push_back(pair.value());
             else if (pair.key().find(".weight") != std::string::npos) {
@@ -283,9 +289,11 @@ void train(const std::string& _root,
     }
 
     std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
+    std::cout << "\033[33m" << "Optimizer: " << "\033[37m";
     if (std::get<bool>(opt["adam"]))
     {
-        //std::cout << "optimizer use Adam" << " lr0 " << lr0 << std::endl;
+         
+        std::cout << "Adam" << " lr0 " << lr0 << std::endl;
         auto adam_option = torch::optim::AdamOptions(lr0).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
         optimizer = std::make_shared<torch::optim::Adam>(
             pg2, adam_option);
@@ -309,7 +317,7 @@ void train(const std::string& _root,
     }
     else
     {   // default at here -- opt.adam : false
-        // std::cout << "optimizer use SGD" << " lr0 " << lr0 << std::endl;
+        std::cout << "SGD" << " lr0 " << lr0 << std::endl;
         optimizer = std::make_shared<torch::optim::SGD>(
             pg2, torch::optim::SGDOptions(lr0)
             .momentum(momentum)
@@ -334,7 +342,7 @@ void train(const std::string& _root,
         }
     }
     // 按python代码，显示optimizer groups信息
-    std::cout << "Optimizer: lr = " << lr0 << " with  groups pg1: " << pg1.size() << " weight(decay=0.0), pg0: "
+    std::cout << "optimizer with  groups pg1: " << pg1.size() << " weight(decay=0.0), pg0: "
         << pg0.size() << " weight(decay= " << weight_decay << ") pg2 (bias): "
         << pg2.size() << std::endl;
     // Resume
@@ -369,10 +377,10 @@ void train(const std::string& _root,
                 std::cout << "optimizer->load() over... " << std::endl;
             }
           
-            for (auto& params : optimizer->param_groups())
-            {
-                std::cout << params.options().get_lr() << std::endl;
-            }
+            // for (auto& params : optimizer->param_groups())
+            // {
+            //     std::cout << params.options().get_lr() << std::endl;
+            // }
 
             std::cout << std::endl;
         }
@@ -394,7 +402,6 @@ void train(const std::string& _root,
 
 
     // Image sizes
-    std::cout << " load pretrained over ...." << std::endl;
     auto gs = std::max(32, model->get_stride_max()); // grid size (max stride)
     auto nl = model->module_detect->nl;
     // Trainloader
@@ -412,6 +419,7 @@ void train(const std::string& _root,
     bool cache_images = std::get<bool>(opt["cache_images"]);
     float pad = 0.0f;
 #if 1 
+    std::cout << "\033[33m" << "Train Datasets: " << "\033[37m" << train_path << std::endl;
     std::shared_ptr<LoadImagesAndLabels> load_dataset = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
                 rect, image_weights, cache_images, nc == 1, gs, pad, "");
     auto datasets = load_dataset->map(torch::data::transforms::Stack<>());
@@ -424,6 +432,7 @@ void train(const std::string& _root,
     auto dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(datasets), dataloader_options);
 
+    std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << test_path << std::endl;                
     std::shared_ptr<LoadImagesAndLabels> val_dataset = std::make_shared<LoadImagesAndLabels>(test_path, hyp, imgsz, batch_size * 2, false,
         true, image_weights, cache_images, nc == 1, gs, 0.5f, "");
 #else
@@ -440,7 +449,6 @@ void train(const std::string& _root,
         std::move(datasets), batch_size);
 #endif
     std::cout << " create dataloader over ...." << std::endl;
- 
     auto model_modules = model->module_detect;
 
     // no opt.resume，输出tensorboard， 
@@ -464,8 +472,7 @@ void train(const std::string& _root,
     int ni = 0;
     std::cout << "All init is over, start training..." << std::endl;    
 
-
-    Singleton_PlotBatchImages::getInstance(save_dir, "train")->reset_counter();
+    Singleton_PlotBatchImages::getInstance(save_dir, "batch_train")->reset_counter();
     for (auto epoch = start_epoch; epoch < epochs; epoch++)
     {
         model->to(device);
@@ -499,7 +506,7 @@ void train(const std::string& _root,
 
             if(idx == 0 && epoch < (start_epoch + 3))
             {
-                Singleton_PlotBatchImages::getInstance(save_dir, "train")->push_data(imgs, target);
+                Singleton_PlotBatchImages::getInstance(save_dir, "batch_train")->push_data(imgs, target);
             }
 
             imgs = imgs.to(torch::kFloat) / 255.f;

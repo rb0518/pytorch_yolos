@@ -379,7 +379,7 @@ ap_per_class(
         //std::cout << "recall [0] " << recall.index({ torch::indexing::Slice(), 0 }).sizes() << std::endl;
         //std::cout << "recall [0] " << precision.index({ torch::indexing::Slice(), 0 }).sizes() << std::endl;
         std::vector<float> recall_v = tensor_to_vector(recall.index({ torch::indexing::Slice(), 0 }));
-        std::vector<float> precision_v = tensor_to_vector(recall.index({ torch::indexing::Slice(), 0 }));
+        std::vector<float> precision_v = tensor_to_vector(precision.index({ torch::indexing::Slice(), 0 }));
 
         for (int px_i = 0; px_i < px.size(0); px_i++)
         {

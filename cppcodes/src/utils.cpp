@@ -248,7 +248,7 @@ std::vector<torch::Tensor> non_max_suppression(
     constexpr int max_wh = 4096;
     constexpr int max_det = 300;
     constexpr int max_nms = 30000;
-    constexpr float time_limit = 10.0;
+    constexpr float time_limit = 30.0;
     bool redundant = true;
     bool merge = false;
 
@@ -345,7 +345,7 @@ std::vector<torch::Tensor> non_max_suppression(
         auto boxes = x.index({torch::indexing::Slice(), torch::indexing::Slice(0, 4)}) + c.unsqueeze(1);
         auto scores = x.index({torch::indexing::Slice(), 4});
 
-        std::vector<cv::Rect2d> cv_boxes;
+        std::vector<cv::Rect> cv_boxes;
         std::vector<float> cv_scores;
         for(int i = 0; i < x.size(0); i++)
         {
@@ -354,13 +354,18 @@ std::vector<torch::Tensor> non_max_suppression(
             auto x2 = boxes[i][2].item().toDouble();
             auto y2 = boxes[i][3].item().toDouble();
 
-            cv_boxes.push_back(cv::Rect2d(cv::Point2d(x1, y1), cv::Point2d(x2, y2)));
+            cv_boxes.push_back(cv::Rect(cv::Point2d(x1, y1), cv::Point2d(x2, y2)));
             cv_scores.push_back(scores[i].item().toFloat());
         }
 
         // run cv::dnn::NMSBoxes
         std::vector<int> nms_indices;
+#if 0
+        std::vector<float> updated_scores;
+        cv::dnn::softNMSBoxes(cv_boxes, cv_scores, updated_scores, conf_thres, iou_thres, nms_indices);
+#else
         cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres, iou_thres, nms_indices);
+#endif        
 //        std::cout << "After cv::dnn::NMSBoxes: " << nms_indices.size() << std::endl;
 
         // 构造返回函数，压入vector
@@ -396,7 +401,6 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     torch::jit::script::Module jit_model;
     try {
         jit_model = torch::jit::load(strScriptfile);
-        std::cout << "torch::jit::load over..." << std::endl;
         // 1、转存时已经将网上的yolov5s.pt从half-->float, 并指定在kCUDA上
         // 2、目前是用的trace，由于有可能有动态控制流，是否要用torch.jit.script，待测
         // 3、register_module注册子模块以保持参数名一致性
@@ -427,7 +431,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         jit_params[param.name] = param.value;
         //std::cout << "jit_model:  " << param.name << std::endl;
     }
-    std::cout << "load jit weigth, params count " << jit_params.size() << std::endl;
+    auto jit_params_count = jit_params.size();
     int n_params = 0;
     int count_changes = 0;
 
@@ -459,8 +463,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         }
         n_params += 1;
     }
-    //if (b_showinfo)
-    std::cout << "Total model parameters: " << n_params << " loaded " << count_changes << " paramterss." << std::endl;
+    std::cout <<"Load jit parameters total: " << jit_params_count << " Model parameters totals: " << n_params << " trans_count: " << count_changes << " paramterss." << std::endl;
     return count_changes;
 }
 

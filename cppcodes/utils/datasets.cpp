@@ -283,8 +283,8 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 		for (auto& [k, v] : _hyp)	
 			hyp[k] = v;
 
-	auto get_labelpath = [&]() {
-			auto img_path = std::filesystem::path(path);
+	auto get_labelpath = [&](std::string _path) {
+			auto img_path = std::filesystem::path(_path);
 			if(std::filesystem::is_directory(img_path) && std::filesystem::exists(img_path))
 			{ 
 				images_dir = path;
@@ -304,22 +304,8 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 	std::vector<std::string> list_imgs;
 	auto parent_path = std::filesystem::path(this->path).parent_path().string();
 	bool b_save_filter = true;
-	if (std::filesystem::is_directory(std::filesystem::path(this->path)))
-	{
-		listallfiles_withsuffixes(std::filesystem::path(path), list_imgs, img_format);
-		get_labelpath();
-	}
-	else
-	{	// 从txt文件�?读取，每行为�?�?图像:"./images/train2017/000000109622.jpg",根目录是coco
 
-		auto img_path_filter = std::filesystem::path(path + ".filter");
-		if(std::filesystem::exists(img_path_filter))
-		{
-			std::cout << "found last run filter txt file..." << img_path_filter.string() << std::endl;
-			path = path + ".filter";
-			b_save_filter = false; 
-		}
-		auto read_files_from_txt = [&](const std::string& filename, std::vector<std::string>& lists){
+	auto read_files_from_txt = [&](const std::string& filename, std::vector<std::string>& lists){
 			std::ifstream file(filename);
 			std::string line;
 			if(file.is_open())
@@ -338,6 +324,41 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 			}
 		};
 
+
+
+	if (std::filesystem::is_directory(std::filesystem::path(this->path)))
+	{
+		auto tmp_dirname = std::filesystem::path(this->path).stem().string();
+		auto img_path_filter = std::filesystem::path(parent_path).append(tmp_dirname + ".filter");
+
+		if(std::filesystem::exists(std::filesystem::path(img_path_filter)))
+		{
+			std::cout << "check filter file: " << img_path_filter.string() <<" Replace the original: " << path << std::endl;	
+			read_files_from_txt(img_path_filter, list_imgs);		
+			images_dir = parent_path;
+			labels_dir = std::filesystem::path(parent_path).parent_path().append("labels/" + tmp_dirname).string();
+			//std::cout << "convert labels_dir: " << labels_dir << std::endl;
+			path = img_path_filter;
+			//std::cout << "new path: " << path << " sub: " << path.substr(this->path.length() - 7) << std::endl;
+
+			b_save_filter = false;
+		}
+		else
+		{
+			listallfiles_withsuffixes(std::filesystem::path(path), list_imgs, img_format);
+			get_labelpath(this->path);
+		}
+	}
+	else
+	{	// 从txt文件读取，每行为图像:"./images/train2017/000000109622.jpg",根目录是coco
+		auto img_path_filter = std::filesystem::path(path + ".filter");
+		if(std::filesystem::exists(img_path_filter))
+		{
+			// 该文件是第一次数据集扫描生成的，已经整理过的数据，可以大大幅降低后续训练时载入时间
+			std::cout << "check filter file: " << img_path_filter.string() <<" Replace the original: " << path << std::endl;	
+			path = path + ".filter";
+			b_save_filter = false; 
+		}
 		//std::cout << "datasets image root: " << parent_path << std::endl;
 		read_files_from_txt(this->path, list_imgs);
 		//std::cout << "total read images name count: " << list_imgs.size() << std::endl;
@@ -349,13 +370,9 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 		}
 		else
 			labels_dir = parent_path;
-		
-		std::cout << "label path: " << labels_dir << std::endl;
 	}
 	
-	std::cout << "total train images count: " << list_imgs.size() << std::endl;
 	// 构造img_files和label_files队列，并随机打乱队列
-
 	label_files.clear();
 	img_files.clear();
 
@@ -363,7 +380,6 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 		&& path.substr(this->path.length() - 7) == ".filter")
 	{	// 读取以前的数据集，保存过的文件
 		b_save_filter = false;
-
 
 		for (int i = 0; i < list_imgs.size(); i++)
 		{
@@ -378,6 +394,7 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 			img_files.emplace_back(item);
 			label_files.emplace_back(labelfile);
 		}
+		std::cout << "\x1b[2K\r" << "get label file lists: " << label_files.size() << " | " << list_imgs.size() << " " << std::endl;
 	}
 	else
 	{
@@ -423,7 +440,7 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 				label_files.emplace_back(temp_labels[v_id][i]);
 			}
 		}
-		std::cout << "total images: " << img_files.size() << std::endl;
+		// std::cout << "total images: " << img_files.size() << std::endl;
 	}
 	if(b_save_filter)
 	{	// 保存至原文件目录下
@@ -445,8 +462,6 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 		}
 		std::cout << "save all exists files in file: " << save_path << std::endl;
 	}
-	LOG(INFO) << "total found images and labels: " << img_files.size() << " " << label_files.size() << std::endl;
-
 	indices = random_queue(img_files.size());
 }
 

@@ -351,16 +351,6 @@ void ModelImpl::readconfigs(const std::string& yaml_file)
         YAML::Node layer = node_head[i];
         layer_cfgs.push_back(read_one_layer(layer));    
     }
-    // 检查是否读取正确
-    if(1) //(b_showdebug)
-    {
-        std::cout << "nc: " << nc << std::endl;
-        std::cout <<"Total layers: " << layer_cfgs.size() << std::endl;
-        int i = 0;
-        std::for_each(layer_cfgs.begin(),layer_cfgs.end(),[&](YoloLayerDef layer){
-            std::cout << std::setw(3) << i << "  " << layer.show_info() << std::endl; i+=1;
-            });  
-    }
 }
 
 void ModelImpl::create_modules()
@@ -466,4 +456,16 @@ void ModelImpl::initialize_weights()
             submodule->as<torch::nn::ReLU6>()->options.inplace(true);
         }
     }
+}
+
+void ModelImpl::show_modelinfo()
+{
+    std::cout << "\033[33m" << "Model: " << "\033[37m" << this->cfgfile << std::endl;
+    std::cout << "nc: " << n_classes << " ch: " << n_channels << " height: " << image_height << " widht: " << image_width << std::endl;
+    int i = 0;
+    std::for_each(layer_cfgs.begin(),layer_cfgs.end(),[&](YoloLayerDef layer){
+        std::cout << std::setw(3) << i << "  " << layer.show_info() << std::endl; i+=1;
+        });  
+
+    std::cout << "Total layers: " << layer_cfgs.size() << std::endl;
 }

@@ -75,10 +75,12 @@ public:
 
 public:
     ModelImpl(const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo);
-   
+    
     //virtual torch::Tensor forward(torch::Tensor x) override;
     std::tuple<torch::Tensor, std::vector<torch::Tensor>> forward(torch::Tensor x);
     
+    void show_modelinfo();
+
     // 重写_apply方法处理子模块，对应到python中的_apply(self, fn)
 //    torch::nn::Module& apply(const std::function<void(torch::nn::Module&)>& fn);
 private:

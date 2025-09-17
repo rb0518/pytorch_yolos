@@ -101,6 +101,7 @@ int main(int argc, char* argv[])
             }
             
             auto opt_yaml = std::filesystem::path(ckpt).parent_path().parent_path().append("opt.yaml").string();
+            std::cout << "Use last opt: " << opt_yaml << " " << std::filesystem::path(ckpt).parent_path().parent_path().string() << std::endl;
             opt = load_cfg_yaml(opt_yaml);
             //opt.cfg, opt.weights, opt.resume, opt.batch_size, opt.global_rank, opt.local_rank 
             //      = '', ckpt, True, opt.total_batch_size, * apriori  # reinstate
@@ -269,6 +270,10 @@ int main(int argc, char* argv[])
             std::vector<torch::Tensor> bboxs;
             bboxs= non_max_suppression(output_tensor, confidence_threshold, iou_threshold, {},
                 false, false, {});
+
+            
+            
+
             for(int i = 0; i < bboxs.size(); i++)
             {
                 auto boxs = bboxs[i];

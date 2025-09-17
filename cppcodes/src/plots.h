@@ -116,3 +116,11 @@ void plot_images(torch::Tensor images, torch::Tensor targets,
     bool normalise = false,
     std::vector<std::string> names = {},
     int max_subplots = 16);
+
+void plot_images_pred(torch::Tensor images, std::vector<torch::Tensor> preds,
+    std::string path, std::string fname,
+    bool normalise = false,
+    std::vector<std::string> names = {},
+    int max_subplots = 16);
+
+void plot_pred(cv::Mat& img, torch::Tensor pred, std::vector<std::string> names, int line_thickness = 3);
