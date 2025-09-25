@@ -29,16 +29,6 @@ void ConvImpl::Init_Modules(int c1, int c2, int k, int s, int p)
     padding = p;
     if(p < 0)
         padding = static_cast<int>(std::trunc(float(k-1)/2.0));
-//    std::cout << "ConvImple: " << c1 << " " << c2 << " " << k << " " << s << " " << p << std::endl;        
-//    std::cout << "ConvImple: " << in_ch << " " << out_ch << " " << k_size << " " << stride << " " << padding << std::endl;
-   /*
-   conv = torch::nn::Sequential(
-        torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, k).stride(s).padding(padding)),
-        torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(c2)),
-        torch::nn::SiLU()
-    );
-    */
-    // bias(false)能将weights从150M缩减到28M，后续采用half，还能进一步减小weights的尺寸
     conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, k).stride(s).padding(padding).bias(false).groups(1).dilation(1));
     bn = torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(c2));
     this->silu = torch::nn::SiLU();  //本可以用torch::silu直接用，但为了与pytorch代码保持一致，按这样操作
@@ -48,6 +38,10 @@ void ConvImpl::Init_Modules(int c1, int c2, int k, int s, int p)
     register_module("bn", bn);
 }
 
+/*
+    测试了去年BatchNorm2d，修改fusedconv的weight和bias，同等训练没有正确推理
+    输出
+*/
 void ConvImpl::fuse_conv_and_bn(bool fused_ /*= true*/)
 {
     if (fused_)
@@ -58,18 +52,20 @@ void ConvImpl::fuse_conv_and_bn(bool fused_ /*= true*/)
             padding(padding).
             bias(true).groups(1).dilation(1));
 
-        auto w_conv = conv->weight.clone().view({ out_ch, -1 });
-        auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
-        fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
+            for (auto& param : fusedconv->named_parameters())
+                param->set_requires_grad(false);
 
-        auto b_conv = torch::zeros({ conv->weight.size(0) }).to(conv->weight.device());
-        auto b_bn = bn->bias - bn->weight.mul(bn->running_mean).div(torch::sqrt(bn->running_var + 1e-5));
-        fusedconv->bias.copy_(torch::mm(w_bn, b_conv.reshape({ -1, 1 })).reshape({ -1 }) + b_bn);
+            auto w_conv = conv->weight.clone().view({ out_ch, -1 });
+            auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
+            fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
 
-        replace_module("conv", fusedconv);
+            auto b_conv = torch::zeros({ conv->weight.size(0) }).to(conv->weight.device());
+            auto b_bn = bn->bias - bn->weight.mul(bn->running_mean).div(torch::sqrt(bn->running_var + 1e-5));
+            fusedconv->bias.copy_(torch::mm(w_bn, b_conv.reshape({ -1, 1 })).reshape({ -1 }) + b_bn);
 
-        for (auto& param : fusedconv->named_parameters())
-            param->set_requires_grad(false);
+            replace_module("conv", fusedconv);
+            
+            bfirst = false;
     }
     else
     {
@@ -97,33 +93,7 @@ void ConvImpl::check_args(std::vector<arg_complex>& args)
 
 torch::Tensor ConvImpl::forward(torch::Tensor x)
 {
-#if 0 
-    if (fused || is_training() == false)
-    {
-        
-        this->fusedconv = torch::nn::Conv2d(
-            torch::nn::Conv2dOptions(in_ch, out_ch, k_size).stride(stride).
-            padding(padding).
-            bias(true).groups(1).dilation(1));
-
-        fusedconv->to(x.device());
-
-        auto w_conv = conv->weight.clone().view({ out_ch, -1 });
-        auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
-        fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
-
-        auto b_conv = torch::zeros({ conv->weight.size(0) }).to(conv->weight.device());
-        auto b_bn = bn->bias - bn->weight.mul(bn->running_mean).div(torch::sqrt(bn->running_var + 1e-5));
-        fusedconv->bias.copy_(torch::mm(w_bn, b_conv.reshape({ -1, 1 })).reshape({ -1 }) + b_bn);
-
-        for (auto& param : fusedconv->parameters())
-            param.set_requires_grad(false);
-        
-        return silu->forward(conv->forward(x));
-    }
-    return silu->forward(bn->forward(conv->forward(x)));
-#endif   
-    return silu->forward(bn->forward(conv->forward(x)));
+    return silu->forward(bn->forward(conv->forward(x)));   
 }
 
 torch::Tensor ConvImpl::forward(std::vector<torch::Tensor> x)
@@ -152,37 +122,64 @@ torch::Tensor BottleneckImpl::forward(torch::Tensor x)
     if(b_shortcut)
         return x + cv2->forward(cv1->forward(x));
     return cv2->forward(cv1->forward(x));
-    /*
-    std::vector<torch::Tensor> out(3);
-    out[0] = cv1->forward(x);
-    out[1] = cv2->forward(out[0]);
-    if(b_shortcut)
-    {
-//        std::cout << "run in shortcut type" << std::endl;
-        out[2] = x + out[1];
-        return out[2];
-    }    
-//    std::cout << "run not with shortcut" << std::endl;
-    return out[1];
-    */
 }
-
-torch::Tensor BottleneckImpl::forward(std::vector<torch::Tensor> x)
+//=================  BottleneckCSPImpl ================================
+void BottleneckCSPImpl::check_args(std::vector<arg_complex>& args)
 {
-    LOG(ERROR) << "This module not accept mult-input";
-    return x[0];
+
 }
 
-void C3Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
+void BottleneckCSPImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     check_args(args);
     Init_Modules(in_channels, std::get<int>(args[0]), number,
         std::get<bool>(args[1]), float(std::get<int>(args[2])));
 }
 
-C3Impl::C3Impl(int c1, int c2, int n, bool shortcut, float e)
+void BottleneckCSPImpl::Init_Modules(int c1, int c2, int n /*= 1*/, bool shortcut_ 
+        /*= true*/, int g /*=1*/, float e /*= 0.5*/)
 {
-    Init_Modules(c1, c2, n, shortcut, e);
+    in_ch = c1;
+    out_ch = c2;
+    number = n;
+    expansion = e;
+    int c_ = int(float(c2) * e);
+    cv1 = Conv(c1, c_, 1, 1, -1);
+    cv2 = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c_, 1).stride(1).bias(false));
+    cv3 = torch::nn::Conv2d(torch::nn::Conv2dOptions(c_, c_, 1).stride(1).bias(false));
+    cv4 = Conv(2*c_, c2, 1, 1, -1);
+    bn = torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(2*c_));
+    act = torch::nn::SiLU();
+
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+    register_module("cv3", cv3);
+    register_module("cv4", cv4);
+    register_module("bn", bn);
+    for(int i = 0; i < n; i++){
+         m->push_back(Bottleneck(c_, c_, shortcut_, 1.0));
+    }
+    register_module("m", m);
+}
+
+torch::Tensor BottleneckCSPImpl::forward(std::vector<torch::Tensor> x)
+{
+    LOG(ERROR) << "This module not accept mult-input";
+    return x[0];
+}
+torch::Tensor BottleneckCSPImpl::forward(torch::Tensor x)
+{
+    torch::Tensor y1 = cv3->forward(m->forward(cv1->forward(x)));
+    torch::Tensor y2 = cv2->forward(x);
+    return cv4->forward(act->forward(bn->forward(torch::cat({y1, y2}, 1))));
+}
+
+//=================  C3Impl ================================
+void C3Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    check_args(args);
+    Init_Modules(in_channels, std::get<int>(args[0]), number,
+        std::get<bool>(args[1]), float(std::get<int>(args[2])));
 }
 
 void C3Impl::Init_Modules(int c1, int c2, int n, bool shortcut, float e)
@@ -201,14 +198,10 @@ void C3Impl::Init_Modules(int c1, int c2, int n, bool shortcut, float e)
     register_module("cv2", cv2);
     register_module("cv3", cv3);
 
-
      for(int i = 0; i < n; i++){
-         bottlenecks.push_back(Bottleneck(c_, c_, shortcut, 1.0));
-         register_module("m-"+std::to_string(i), bottlenecks[i]);
-
+         m->push_back(Bottleneck(c_, c_, shortcut, 1.0));
      }
-
-//    std::cout << "C3 c1" << c1 << " c2 " << c2 << " shortcut: " << shortcut << std::endl;
+     register_module("m", m);
 }
 
 void C3Impl::check_args(std::vector<arg_complex>& args)
@@ -231,22 +224,7 @@ void C3Impl::check_args(std::vector<arg_complex>& args)
 
 torch::Tensor C3Impl::forward(torch::Tensor x)
 {
-    std::vector<torch::Tensor> b_outs(number);
-    //std::cout << "number: " << number << " input size: " << x.sizes() << std::endl;
-    torch::Tensor c1_out = cv1->forward(x);
-    torch::Tensor c2_out = cv2->forward(x);
-
-    ///std::cout << "c1_out " << c1_out.sizes() << " c2_out " << c2_out.sizes() << std::endl;
-    for (int i = 0; i < number; i++)
-    {
-        if(i == 0)
-            b_outs[i] = bottlenecks[i]->forward(c1_out);
-        else
-            b_outs[i] = bottlenecks[i]->forward(b_outs[i-1]);
-    }
-    //std::cout << "bottleneck number :" << b_outs[number-1].sizes() << std::endl;            
-    torch::Tensor cat_out = torch::cat({ b_outs[number - 1], c2_out}, 1);
-    return cv3->forward(cat_out);
+    return cv3->forward(torch::cat({m->forward(cv1->forward(x)), cv2->forward(x)}, 1));
 }
 
 torch::Tensor C3Impl::forward(std::vector<torch::Tensor> x)
@@ -274,7 +252,7 @@ torch::Tensor ConcatImpl::forward(torch::Tensor x)
     LOG(ERROR) << "This module only accept mult-input";
     return x;
 }
-
+//=================  nnUpsampleImpl ================================
 void nnUpsampleImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     in_ch = in_channels;
@@ -334,6 +312,7 @@ torch::Tensor nnUpsampleImpl::forward(torch::Tensor x)
 }
 
 #include <math.h>
+//=================  SPPFImpl ================================
 void SPPFImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]));
@@ -362,21 +341,10 @@ torch::Tensor SPPFImpl::forward(std::vector<torch::Tensor> x)
 }
 torch::Tensor SPPFImpl::forward(torch::Tensor x)
 {
-    //std::cout << "SPPF forward input: " << x.sizes() << std::endl;
     torch::Tensor x1 = cv1->forward(x);
-    //std::cout << "SPPF forward input cv1: " << x1.sizes() << std::endl;
     torch::Tensor y1 = m->forward(x1);
-    //std::cout << "SPPF forward m1 : " << y1.sizes() << std::endl;
     torch::Tensor y2 = m->forward(y1);
-    //std::cout << "SPPF forward m2 : " << y2.sizes() << std::endl;
-    torch::Tensor y3 = m->forward(y2);
-    //std::cout << "SPPF forward m3 : " << y3.sizes() << std::endl;
-    torch::Tensor cat_out = torch::cat({x1, y1, y2, y3}, 1);
-    //std::cout << "SPPF forward cat : " << cat_out.sizes() << std::endl;
-
-    torch::Tensor ret = cv2->forward(cat_out);
-    //std::cout << "SPPF forward cv2 : " << ret.sizes() << std::endl;
-    return ret;
+    return cv2->forward(torch::cat({x1, y1, y2, m->forward(y2)}, 1));
 }
 //------------------- SPP -------------------------------
 // SPP 参数形式为 [1024, [5, 9, 13]]  SPPF: [1024, 5]
@@ -398,10 +366,10 @@ void SPPImpl::Init_Modules(int c1, int c2)
     for(int i = 0; i < k.size(); i++)
     {
         int p = static_cast<int>(std::trunc(k[i] / 2));
-        m->push_back(register_module("m-" + std::to_string(i),
-            torch::nn::MaxPool2d(torch::nn::MaxPool2dOptions(k[i])
-                .stride(1).padding(p))));
+        m->push_back(torch::nn::MaxPool2d(torch::nn::MaxPool2dOptions(k[i])
+                .stride(1).padding(p)));
     }
+    register_module("m", m);
 }
 
 torch::Tensor SPPImpl::forward(std::vector<torch::Tensor> x)
@@ -508,3 +476,82 @@ torch::Tensor FocusImpl::forward(std::vector<torch::Tensor> x)
     LOG(ERROR) << "This module not accept mult-input";
     return x[0];
 }
+
+void ContractImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    in_ch = in_channels;
+    gain = std::get<int>(args[0]);
+    out_ch = in_channels * gain * gain;
+}
+
+torch::Tensor ContractImpl::forward(std::vector<torch::Tensor> x)
+{
+    LOG(ERROR) << "This module not accept mult-input";
+    return x[0];
+}
+torch::Tensor ContractImpl::forward(torch::Tensor x)
+{
+    auto b = x.size(0);  // (1, 64, 80, 80)
+    auto c = x.size(1);
+    auto h = x.size(2);
+    auto w = x.size(3);
+
+    auto x_ret = x.view({b, c, h/gain, gain, w/gain, gain});  // (1,64,40,2,40,2)
+    x_ret = x_ret.permute({0, 3, 5, 1, 2, 4}).contiguous(); // x(1,2,2,64,40,40)
+    return x_ret.view({b, c*gain*gain, h/gain, w/gain});   // (1, 256, 40, 40)
+}
+
+void ExpandImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    in_ch = in_channels;
+    gain = std::get<int>(args[0]);
+    out_ch = in_channels / (gain * gain);
+}
+
+torch::Tensor ExpandImpl::forward(std::vector<torch::Tensor> x)
+{
+    LOG(ERROR) << "This module not accept mult-input";
+    return x[0];
+}
+torch::Tensor ExpandImpl::forward(torch::Tensor x)
+{
+    auto b = x.size(0);  // (1, 64, 80, 80)
+    auto c = x.size(1);
+    auto h = x.size(2);
+    auto w = x.size(3);
+    int gain_pow2 = gain * gain; 
+    auto x_ret = x.view({b, gain, gain, c / gain_pow2, h, w});  // (1,2, 2, 16, 80, 80)
+    x_ret = x_ret.permute({0, 3, 4, 1, 5, 2}).contiguous(); // x(1,16, 80,2,80, 2)
+    return x_ret.view({b, c/gain_pow2, h * gain, w * gain});   // (1, 16, 160, 160)
+}
+// =========================== ProtoImpl ====================
+ProtoImpl::ProtoImpl(int c1, int c_, int c2)
+{
+    in_ch = c1;
+    out_ch = c2;
+    cv1 = Conv(c1, c_, 3, 1, -1);
+    cv2 = Conv(c_, c_, 3, 1, -1);
+    cv3 = Conv(c_, c2, 1, 1, -1);
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+    register_module("cv3", cv3);
+    torch::nn::UpsampleOptions options = torch::nn::UpsampleOptions().mode(torch::kNearest).scale_factor(std::vector<double>({ double(2), double(2) }));
+    upsample = torch::nn::Upsample(options);
+}
+
+torch::Tensor ProtoImpl::forward(torch::Tensor x)
+{
+#if 0
+    torch::Tensor x1 = cv1->forward(x);
+    int H = x1.sizes()[2];
+    int W = x1.sizes()[3];
+    auto x2 = torch::nn::functional::interpolate(x1,
+        torch::nn::functional::InterpolateFuncOptions()
+        .size(std::vector<int64_t>{H*2, W*2})  // 显式指定输出尺寸
+        .mode(torch::kNearest));
+    return cv3->forward(cv2->forward(x2));
+#else
+    return cv3->forward(cv2->forward(upsample->forward(cv1->forward(x))));
+#endif    
+}
+

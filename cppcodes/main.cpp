@@ -14,7 +14,6 @@
 #include "yaml_load.h"
 #include "BaseModel.h"
 #include "yolo.h"
-#include "YOLODataset.h"
 
 #include "utils.h"
 #include "utils/general.h"
@@ -23,6 +22,8 @@
 
 #include "train.h"
 #include "datasets.h"
+
+#include "progressbar.h"
 
 // jit_weights如果设置了，就会先调用pretrain从torchscript,除了代码调试，默认应为""
 // 仿yolov5中代码，FLAGS_weights和FLAGS_jit_weights各取一
@@ -310,7 +311,88 @@ int main(int argc, char* argv[])
                 }
             }
         }
+    }
+    else if(FLAGS_runtype=="temp_test")
+    {
+        VariantConfigs opt;
+        load_default_environment(root_path, opt);
 
+        opt["weights"] = FLAGS_weights;
+        opt["cfg"] = FLAGS_cfg;
+        opt["data"] = FLAGS_data;
+        opt["hyp"] = FLAGS_hyp;
+        opt["batch_size"] = FLAGS_batch_size;
+        opt["img_size"] = std::vector<int>({ FLAGS_img_size, FLAGS_img_size });
+        opt["rect"] = FLAGS_rect;
+        opt["nosave"] = FLAGS_nosave;
+        opt["notest"] = FLAGS_notest;
+        opt["noautoanchor"] = FLAGS_noautoanchor;
+        opt["evolve"] = FLAGS_evolve;
+        opt["device"] = FLAGS_device;
+        opt["adam"] = FLAGS_adam;
+        opt["workers"] = FLAGS_workers;
+        opt["project"] = FLAGS_project;
+        opt["name"] = FLAGS_name;
+        opt["exist_ok"] = FLAGS_exist_ok;
+        opt["quad"] = FLAGS_quad;
+        opt["linear_lr"] = FLAGS_linear_lr;
+        opt["label_smoothing"] = float(FLAGS_label_smoothing);
+        opt["save_period"] = FLAGS_save_period;
+        opt["total_batch_size"] = FLAGS_batch_size;
+
+        std::string data_file = std::filesystem::path(root_path).append(FLAGS_data).string();            
+
+        std::vector<std::string> names;
+        std::string train_path;
+        std::string val_path;
+        if (std::filesystem::exists(std::filesystem::path(data_file)))
+        {       
+            read_data_yaml(data_file, train_path, val_path, names); // 对应两种yaml定义，list和map
+        }
+        else
+        {
+            LOG(ERROR) << "not found you offer data yaml file: " << data_file;
+        }
+        auto is_coco = data_file.substr(data_file.length() - 10, data_file.length() - 1) == "coco.yaml";
+        auto nc = (std::get<bool>(opt["single_cls"])) ? 1 : names.size();
+
+        std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << val_path << std::endl;    
+        VariantConfigs hyp = set_cfg_hyp_default();
+        bool augment = true;        // true && rect == false ==> mosaic = true
+        bool rect = std::get<bool>(opt["rect"]);
+        bool image_weights = false;
+        bool cache_images = false;
+        int gs = 32;
+        float pad = 0.5f;
+        int imgsz = FLAGS_img_size;
+        int batch_size = std::get<int>(opt["batch_size"]);
+
+        std::shared_ptr<LoadImagesAndLabelsAndMasks> val_load_datasets = std::make_shared<LoadImagesAndLabelsAndMasks>(val_path, 
+                                hyp, imgsz, batch_size, augment, rect, image_weights, cache_images, nc == 1, gs, pad, "");
+
+        std::cout << " create val datasets:  LoadImagesAndLabels over ...." << std::endl;
+        auto test_datasets = val_load_datasets->map(CustomCollateSeg());
+        auto total_images = test_datasets.size();
+        int num_images = 0;
+        if (total_images.has_value())
+            num_images = *total_images;
+        std::cout << "test dataset, total images: " << num_images << " batch_size: " << batch_size << std::endl;
+        auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
+        auto val_dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+                std::move(test_datasets), dataloader_options);
+        std::cout << "init dataloader over..." << std::endl;
+        progressbar pbar(num_images/batch_size, 36);
+        for (auto batch : *val_dataloader)
+        {
+            auto imgs = batch.data;
+            auto targets = batch.target;
+            auto masks = batch.mask;
+            auto paths = batch.path;
+            auto shapes = batch.shape;
+            pbar.update();
+            cv::waitKey();
+        }
+        std::cout << std::endl;
     }
 
     return 0;

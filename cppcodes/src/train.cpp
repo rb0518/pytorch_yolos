@@ -10,7 +10,6 @@
 #include "yolo.h"
 #include "general.h"
 #include "datasets.h"
-#include "YOLODataset.h"
 #include "loss.h"
 #include "lambda_lr.h"
 
@@ -134,20 +133,18 @@ void train(const std::string& _root,
     init_torch_seek(2 + std::get<int>(opt["local_rank"])); // default init_seed(1)
     
     auto data_file = std::filesystem::path(_root).append(std::get<std::string>(opt["data"])).string();
-    YAML::Node data_dict;
+    std::vector<std::string> names;
+    std::string train_path;
+    std::string val_path;
     if (std::filesystem::exists(std::filesystem::path(data_file)))
-    {
-        // ???后期需要进行专项修改，因为data yaml中有两种格式，采取map和list
-        data_dict = YAML::LoadFile(data_file);
+    {       
+        read_data_yaml(data_file, train_path, val_path, names); // 对应两种yaml定义，list和map
     }
     else
     {
         LOG(ERROR) << "not found you offer data yaml file: " << data_file;
     }
     auto is_coco = data_file.substr(data_file.length() - 10, data_file.length() - 1) == "coco.yaml";
-
-    std::vector<std::string> names;
-    names = data_dict["names"].as<std::vector<std::string>>();
     auto nc = (std::get<bool>(opt["single_cls"])) ? 1 : names.size();
 
     if (std::get<bool>(opt["single_cls"]))
@@ -159,15 +156,12 @@ void train(const std::string& _root,
     if (names.size() != nc)
     {   // 不用glog CHECK或assert的原因是程序会因异常直接退出
         LOG(WARNING) << "names found in " << data_file << " items, but not equil the nc: " << nc << std::endl;
-        // CHECK(nc == names.size()) << "names found in " << data_file << " items, but not equil the nc: " << nc;
-        // assert(nc == names.size() && " names found in data.yaml not equil nc");
     }
 
     auto pretrained = std::filesystem::path(weights).extension().string() == ".pt"  && 
         std::filesystem::exists(std::filesystem::path(_root).append(weights));
     auto imgsz = std::get<std::vector<int>>(opt["img_size"])[0];//auto imgsz = 
     auto imgsz_test = std::get<std::vector<int>>(opt["img_size"])[1];
-//    std::cout << "imgsz: " << imgsz << " imgsz_test: " << imgsz_test << std::endl;
 
     auto cfg_file = std::get<std::string>(opt["cfg"]);
     if(cfg_file=="")
@@ -221,32 +215,6 @@ void train(const std::string& _root,
     else{
         std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << "None" << std::endl;
     }
-
-    std::string train_path;
-    std::string test_path;
-
-    auto delete_end_backslash = [](std::string& s)
-    {
-        auto s_tmp = s;
-        if(s.substr(s.length()-1)=="\\" || s.substr(s.length()-1)=="/")
-        {
-            s_tmp = s.substr(0, s.length()-1);
-        }
-        return s_tmp;
-    };
-    if(!data_dict["path"].IsDefined())
-    {
-        train_path = data_dict["train"].as<std::string>();
-        test_path = data_dict["val"].as<std::string>();
-    }
-    else
-    {
-        std::string data_path = data_dict["path"].as<std::string>();
-        train_path = std::filesystem::path(data_path).append(data_dict["train"].as<std::string>()).string();
-        test_path = std::filesystem::path(data_path).append(data_dict["val"].as<std::string>()).string();
-    }
-    train_path = delete_end_backslash(train_path);  
-    test_path = delete_end_backslash(test_path);
 
     std::vector<std::string> freeze;    //原代码这里也没有处理初始化队列, 应该对应的是opt["freeze"]的层数
     for (auto p : model->named_parameters())
@@ -418,11 +386,12 @@ void train(const std::string& _root,
     bool image_weights = std::get<bool>(opt["image_weights"]);
     bool cache_images = std::get<bool>(opt["cache_images"]);
     float pad = 0.0f;
-#if 1 
+
+
     std::cout << "\033[33m" << "Train Datasets: " << "\033[37m" << train_path << std::endl;
-    std::shared_ptr<LoadImagesAndLabels> load_dataset = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
+    std::shared_ptr<LoadImagesAndLabels> train_dataset = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
                 rect, image_weights, cache_images, nc == 1, gs, pad, "");
-    auto datasets = load_dataset->map(torch::data::transforms::Stack<>());
+    auto datasets = train_dataset->map(CustomCollate());
 
     auto total_images = datasets.size();
     int num_images = 0;
@@ -432,22 +401,9 @@ void train(const std::string& _root,
     auto dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(datasets), dataloader_options);
 
-    std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << test_path << std::endl;                
-    std::shared_ptr<LoadImagesAndLabels> val_dataset = std::make_shared<LoadImagesAndLabels>(test_path, hyp, imgsz, batch_size * 2, false,
+    std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << val_path << std::endl;                
+    std::shared_ptr<LoadImagesAndLabels> val_dataset = std::make_shared<LoadImagesAndLabels>(val_path, hyp, imgsz, batch_size * 2, false,
         true, image_weights, cache_images, nc == 1, gs, 0.5f, "");
-#else
-    auto datasets = YOLODataset(data_file, ".jpg",
-        imgsz, imgsz,
-        true).map(torch::data::transforms::Stack<>());
-    auto total_images = datasets.size();
-    int num_images = 0;
-    if (total_images.has_value())
-        num_images = *total_images;
-    LOG(INFO) << "create training dataset, total images: " << num_images;
-
-    auto dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-        std::move(datasets), batch_size);
-#endif
     std::cout << " create dataloader over ...." << std::endl;
     auto model_modules = model->module_detect;
 
@@ -496,13 +452,12 @@ void train(const std::string& _root,
         {
             torch::Tensor loss, loss_items;
             ni = idx + ((num_images / batch_size) + 1) * epoch;
+           
             auto imgs = batch.data;
             auto target = batch.target;
-
-            if (imgs.sizes().size() == 5)
-                imgs = imgs.squeeze(0);
-            if (target.sizes().size() == 3)
-                target = target.squeeze(0);
+            auto paths = batch.path;
+            auto shape = batch.shape;
+//            std::cout << "imgs: " << imgs.sizes() << "target: " << target.sizes() << std::endl;
 
             if(idx == 0 && epoch < (start_epoch + 3))
             {
@@ -572,12 +527,8 @@ void train(const std::string& _root,
 
             {   // {}是来限定 set_autocast_enabled（） 的作用域范围
                 at::autocast::set_autocast_enabled(torch::kCUDA, true);
-                //std::cout << "Input image sizes: " << imgs.sizes() << std::endl;
-                //std::cout << "Input targets sizes: " << target.sizes() << std::endl;
-                
                 auto [zeors, pred] = model->forward(imgs);
                 std::tie(loss, loss_items) = compute_loss(pred, target.to(device));
-                //std::cout << "compute_loss over..." << std::endl;
                 if(std::get<bool>(opt["quad"]))
                     loss *= 4.f;
             }
@@ -639,34 +590,6 @@ void train(const std::string& _root,
         }
 
         if(save_flag){   
-            //model->to(torch::kCPU);
-            /*
-            auto save_checkpoint = [&](std::string filename) {
-                    torch::serialize::OutputArchive ckpt_out;
-
-                    torch::serialize::OutputArchive model_out;
-                    model->save(model_out);
-                    ckpt_out.write("model", model_out);
-                    torch::serialize::OutputArchive optim_out;
-#if 0
-                    optimizer->save(optim_out);
-#else
-                    int pg_size = optimizer->param_groups().size();
-                    optim_out.write("size", torch::tensor(pg_size));
-                    for (int i_pg = 0; i_pg < optimizer->param_groups().size(); i_pg++)
-                    {
-                        torch::serialize::OutputArchive tmp_pg;
-                        optimizer->param_groups()[i_pg].options().serialize(tmp_pg);
-                        optim_out.write("param_groups/" + std::to_string(i_pg), tmp_pg);
-                    }
-#endif
-                    ckpt_out.write("optim", optim_out);
-
-                    ckpt_out.write("epoch", torch::tensor(epoch));
-//                    auto ckpt_name = std::filesystem::path(filename).parent_path().append("ckpt.pt").string();
-                    ckpt_out.save_to(filename);
-                };
-            */
             save_checkpoint(last, model, optimizer, epoch);
         }
     } // end epochs

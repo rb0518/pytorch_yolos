@@ -123,3 +123,6 @@ void save_cfg_yaml(const VariantConfigs& cfgs, const std::string& optfile);
 VariantConfigs set_cfg_hyp_default();
 
 void show_cfg_info(const std::string& title, const VariantConfigs& cfgs);
+
+void read_data_yaml(const std::string& data_file, std::string& train_path, std::string& val_path, 
+                std::vector<std::string>& names);

@@ -37,8 +37,8 @@ public:
     torch::Tensor anchors_;
     //torch::Tensor anchor_grid;
 
-    //torch::nn::ModuleList m;  //为了控制变量名，不采用ModuleList
-    std::vector<torch::nn::Conv2d> m;
+    torch::nn::ModuleList m;  //为了控制变量名，不采用ModuleList
+    //std::vector<torch::nn::Conv2d> m;
     void check_anchor_order();
     void _initialize_biases(std::vector<int> cf={});
 };

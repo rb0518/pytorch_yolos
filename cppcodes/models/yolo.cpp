@@ -64,20 +64,22 @@ DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::v
     register_buffer("anchors", anchors_);
     for(int i = 0; i < _ch.size(); i++)
     {
-        torch::nn::Conv2d conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1));
-        m.push_back(conv);
-        register_module("m-"+std::to_string(i), m[i]);
+        //torch::nn::Conv2d conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1));
+        m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
+//        register_module("m-"+std::to_string(i), m[i]);
     }
+    register_module("m", m);
 }
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::vector<torch::Tensor> x) 
 {
-    std::vector<torch::Tensor> ret(this->m.size()); // 统一的返回数组
-    std::vector<torch::Tensor> z(this->m.size());
+    std::vector<torch::Tensor> ret(this->m->size()); // 用ModuleList，解决了named索引的一致，但后续操作不方便
+    std::vector<torch::Tensor> z(this->m->size());
     torch::Tensor z_cat = torch::zeros({ 0 });
     for (int i = 0; i < this->nl; i++)
     {
-        ret[i] = m[i]->forward(x[i]);
+        auto mi = m[i]->as<torch::nn::Conv2d>();
+        ret[i] = mi->forward(x[i]);
         auto bs = ret[i].size(0);     // batch_size
         auto ny = ret[i].size(2);     // h
         auto nx = ret[i].size(3);     // w
@@ -133,13 +135,8 @@ std::tuple<torch::Tensor, torch::Tensor> DetectImpl::_make_grid(int nx, int ny, 
     auto yv = yvxv[0];
     auto xv = yvxv[1];
     auto ret = torch::stack({ xv, yv}, 2).expand({1, na, ny, nx, 2}).to(torch::kFloat);
-//    auto ret = torch::stack({ yvxv[1], yvxv[0]}, 2).expand({1, na, ny, nx, 2}).to(torch::kFloat);
-    auto an_grid = (anchors_[i].clone() * this->stride[i]).view({ 1, this->na, 1, 1, 2 }).expand({ 1, this->na, ny, nx, 2 }).to(torch::kFloat);
-
-    //std::cout << "i: " << i << " ny " << ny << " nx " << nx << std::endl;
-    //std::cout << "anchors: " << anchors_[i].clone().sizes() << " stride: " << this->stride[i].item().toFloat() << std::endl;
-    //std::cout << "anchors: " << anchors_[i].clone().index({"...", 0}) << std::endl;
-
+    auto an_grid = (anchors_[i].clone() * this->stride[i]).view({ 1, this->na, 1, 1, 2 })
+            .expand({ 1, this->na, ny, nx, 2 }).to(torch::kFloat);
     return { ret, an_grid };
 }
 
@@ -162,16 +159,16 @@ void DetectImpl::check_anchor_order()
 // Initialize biases
 void DetectImpl::_initialize_biases(std::vector<int> cf)
 {
-    if(stride.size(0) != m.size())
+    if(stride.size(0) != m->size())
     {
         LOG(ERROR) << "stride size not equil m size.";
         return;
     }
 
-    for (size_t i = 0; i < m.size(); ++i) {
+    for (size_t i = 0; i < m->size(); ++i) {
         auto s = stride[i].item().toFloat();
-
-        auto b = m[i]->bias.view({ na, -1 }); // conv.bias(255) to (3,85)
+        auto mi = m[i]->as<torch::nn::Conv2d>();
+        auto b = mi->bias.view({ na, -1 }); // conv.bias(255) to (3,85)
         b.data().index_put_({torch::indexing::Slice(), 4},
             b.index({ torch::indexing::Slice(), 4 }) +
             std::log(8.0f / std::pow((640.0f / s), 2))); // obj (8 objects per 640 image)
@@ -181,8 +178,8 @@ void DetectImpl::_initialize_biases(std::vector<int> cf)
             b.index({ torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None) }) +
             std::log(0.6f / (float(nc) - 0.99999f)));
  
-        m[i]->bias.data().copy_(b.view({-1}));
-        m[i]->bias.set_requires_grad(true);
+        mi->bias.data().copy_(b.view({-1}));
+        mi->bias.set_requires_grad(true);
     }
 }
 
@@ -227,13 +224,6 @@ ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, 
     initialize_weights();
 }
 
-/*
-torch::Tensor Yolos::forward(torch::Tensor x) 
-{
-    LOG(ERROR) << "Model not support return single Tensor";
-    return x;
-}
-*/
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> ModelImpl::forward(torch::Tensor x)
 {
     if(b_showdebug)

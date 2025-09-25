@@ -407,3 +407,48 @@ void show_cfg_info(const std::string& title, const VariantConfigs& cfgs)
     }
     std::cout << std::endl;
 }
+
+void read_data_yaml(const std::string& data_file, std::string& train_path, std::string& val_path, std::vector<std::string>& names)
+{
+    YAML::Node data_dict = YAML::LoadFile(data_file);
+    YAML::Node dict_name = data_dict["names"];
+
+    bool new_type = dict_name.IsMap();
+    if(new_type)
+    {
+        for (YAML::const_iterator it = dict_name.begin();
+            it != dict_name.end(); ++it)
+        {
+            names.emplace_back(it->second.as<std::string>());
+        }
+    }
+    else
+    {
+        names = dict_name.as<std::vector<std::string>>();
+    }
+
+    if(!data_dict["path"].IsDefined())
+    {
+        train_path = data_dict["train"].as<std::string>();
+        val_path = data_dict["val"].as<std::string>();
+    }
+    else
+    {
+        std::string data_path = data_dict["path"].as<std::string>();
+        train_path = std::filesystem::path(data_path).append(data_dict["train"].as<std::string>()).string();
+        val_path = std::filesystem::path(data_path).append(data_dict["val"].as<std::string>()).string();
+    }
+
+
+    auto delete_end_backslash = [](std::string& s) {
+            auto s_tmp = s;
+            if(s.substr(s.length()-1)=="\\" || s.substr(s.length()-1)=="/")
+            {
+                s_tmp = s.substr(0, s.length()-1);
+            }
+            return s_tmp;
+        };    
+    train_path = delete_end_backslash(train_path);  
+    val_path = delete_end_backslash(val_path);
+}
+

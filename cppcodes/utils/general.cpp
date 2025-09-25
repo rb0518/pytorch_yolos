@@ -242,6 +242,72 @@ torch::Tensor box_iou(const torch::Tensor & boxes1, const torch::Tensor & boxes2
     return inter/(area1.unsqueeze(-1) + area2 - inter);
 }
 
+torch::Tensor segment2box(torch::Tensor& segment, int width, int height)
+{
+    auto x_coords = segment.select(1, 0);
+    auto y_coords = segment.select(1, 1);
+
+    auto mask_x = (x_coords >= 0) * (x_coords <= width);
+    auto mask_y = (y_coords >= 0) * (y_coords <= height); 
+    auto mask = mask_x * mask_y;
+    auto valid_x = torch::masked_select(x_coords, mask);
+    auto valid_y = torch::masked_select(y_coords, mask);
+    // 都超采样了，如果还没有足够多的点，说明大多数在有效区外，先进行面积筛选掉
+    if(valid_x.size(0) > 10 && valid_y.size(0) > 10)
+    {
+        float x_min = torch::min(valid_x).item<float>();
+        float x_max = torch::max(valid_x).item<float>();
+        float y_min = torch::min(valid_y).item<float>();
+        float y_max = torch::max(valid_y).item<float>();
+        return torch::tensor({ x_min, y_min, x_max, y_max });
+    }
+    // 压入空矩形，后面通过与原始输入targets一对一比较筛选掉这些超区域的标签
+    return torch::tensor({0,0,0,0});    
+}
+
+
+// 输入为[N][M,2] ==> [N][n=1000, 2]
+std::vector<torch::Tensor> resample_segments(std::vector<torch::Tensor>& segments, int n /*= 1000*/) 
+{
+	std::vector<torch::Tensor> resampled_segments;
+
+	for (int i = 0; i < segments.size(); ++i) 
+	{
+		auto s = segments[i];
+		int n_pt = s.size(0);
+		// 闭合多边形
+		auto closed = torch::cat({ s, s.index({0}).unsqueeze(0) });	// n_pt+1
+		int remainder = n % n_pt;
+		int nstep = (n - remainder) / n_pt;
+		std::vector<float> new_s;
+		auto x_coords = closed.index({ torch::indexing::Slice(), 0 });
+		auto y_coords = closed.index({ torch::indexing::Slice(), 1 });
+		for (int j = 0; j < n_pt; j++)
+		{
+			float x1 = x_coords[j].item<float>();
+			float x2 = x_coords[j + 1].item<float>();
+			float y1 = y_coords[j].item<float>();
+			float y2 = y_coords[j + 1].item<float>();
+
+			if (j == (n_pt - 1))	// 最后一次，补齐余数
+				nstep += remainder;
+
+			float d_x = (x2 - x1) / float(nstep);
+			float d_y = (y2 - y1) / float(nstep);
+
+			for (int k = 0; k < nstep; k++)
+			{
+				new_s.push_back(x1 + d_x * k);
+				new_s.push_back(y1 + d_y * k);
+			}
+		}
+
+		auto xy_interp = torch::tensor(new_s).view({ -1, 2 });
+		resampled_segments.push_back(xy_interp);
+	}
+	return resampled_segments;
+}
+
 ModelEMA::ModelEMA(std::shared_ptr<Model> ptr_model, float decay, int updates)
 {
     decay_ = decay;
@@ -287,4 +353,21 @@ void ModelEMA::update(torch::nn::Module& model)
             }
         }
     }
+}
+#include <fstream>
+std::string getLastLine(const std::string& filename) 
+{
+    std::ifstream file(filename);
+    if (!file.is_open()) 
+        return ""; 
+    file.seekg(-1, std::ios_base::end); 
+    long pos = file.tellg(); 
+    while (pos > 0 && file.get() != '\n') 
+    { // 向上回溯找到第一个回车符
+        --pos;
+        file.seekg(pos, std::ios_base::beg); 
+    }
+    std::string lastLine;
+    std::getline(file, lastLine); // 再读取下一行，就是最后一行了
+    return lastLine;
 }

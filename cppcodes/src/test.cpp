@@ -7,10 +7,17 @@
 #include "datasets.h"
 #include "metrics.h"
 #include "progressbar.h"
-
+#include "general.h"
 #include "plots.h"
 
 #include "metrics.h"
+
+#include <regex>
+//    std::regex pattern("yolov5([nsmlx])?.yaml");  return std::resgex_search(filename, pattern);
+bool contains(const std::string& source, const std::string& to_find) {
+    std::regex re(to_find);
+    return std::regex_search(source, re);
+}
 
 torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, std::vector<float> img0_shape,
     std::vector<std::vector<float>> ratio_pad = {})
@@ -141,7 +148,7 @@ void test(
     {
         val_load_datasets = std::move(val_datasets);
     }
-    auto test_datasets = val_load_datasets->map(torch::data::transforms::Stack<>());
+    auto test_datasets = val_load_datasets->map(CustomCollate());
     auto total_images = test_datasets.size();
     int num_images = 0;
     if (total_images.has_value())
@@ -170,10 +177,6 @@ void test(
     {
         auto img = batch.data;
         auto targets = batch.target;
-        if (img.sizes().size() == 5)
-            img = img.squeeze(0);
-        if (targets.sizes().size() == 3)
-            targets = targets.squeeze(0);
 
         img = img.to(device).to(torch::kFloat);
         img = img / 255.f;
@@ -200,7 +203,7 @@ void test(
         {
             if (batch_i < 3)
             {
-                std::string save_name = "batch_val_label_" + std::to_string(batch_i) + ".jpg";
+                std::string save_name = "batch_val" + std::to_string(batch_i) + "_label.jpg";
                 plot_images(img.clone().to(torch::kCPU), targets.clone().to(torch::kCPU), save_dir, save_name, true, cls_names);
             }
         }
@@ -230,7 +233,7 @@ void test(
         {
             if (batch_i < 3)
             {
-                std::string save_name = "batch_val_pred_" + std::to_string(batch_i) + ".jpg";
+                std::string save_name = "batch_val" + std::to_string(batch_i) + "_pred.jpg";
                 plot_images_pred(img.clone().to(torch::kCPU), out_vc, save_dir, save_name, true, cls_names);
             }
         }

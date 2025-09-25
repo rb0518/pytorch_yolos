@@ -78,6 +78,19 @@ torch::Tensor xyxy2xywhn(const torch::Tensor& x, int w /*= 640*/, int h /*= 640*
     return y;
 }
 
+torch::Tensor xyn2xy(const torch::Tensor& x, int w, int h, int padw, int padh)
+{
+    TORCH_CHECK(x.size(-1) == 2, "input shape last dimension expected 2 but input shape is ", x.sizes());
+    auto y = torch::empty_like(x);
+    
+    // 计算转换后的坐标
+    y.index_put_({"...", 0}, w * x.index({"...", 0}) + padw);  // top left x
+    y.index_put_({"...", 1}, h * x.index({"...", 1}) + padh);  // top left y
+   
+    return y;
+}
+
+
 int searchfiles_in_folder(const std::string& folder, const std::string& exttype, 
         std::vector<std::string>& lists)
 {
@@ -100,125 +113,6 @@ std::tuple<float, bool> ConvertToNumber(const std::string& str)
     float f_r;
     auto result = std::from_chars(str.data(), str.data() + str.size(), f_r);
     return std::make_tuple(f_r, result.ec == std::errc());
-}
-
-/*
-    python原代码
-    def non_max_suppression(
-        prediction,
-        conf_thres=0.25,
-        iou_thres=0.45,
-        classes=None,
-        agnostic=False,
-        multi_label=False,
-        labels=(),
-        max_det=300,
-        nm=0,  # number of masks
-
-    pred 网络在eval状态下，输出tuple的第一个elements
-    conf_thres : confience threshold 置信度阈值
-    iou_trehs  : IOU 阈值
-    其它的参数暂时不支持，classes 只保留的类别，默认为None，所有的都保留；agnostic_nms:nms去除类别无关的；max_det，保留的最大检测目标数
-
-*/
-int non_max_suppression_old(torch::Tensor prediction, float conf_thres, float iou_thres, std::vector<Detection>& output)
-{
-    const int item_attr_size = 5;
-
-    int bs = prediction.size(0);    // 取得batch_size
-    if (bs != 1)
-    {
-        std::cout << "program only support detect one image ervery time.";
-        return 0;
-    }
-
-    auto nc = prediction.size(2) - item_attr_size;
-
-    bool multi_label = nc > 1;  
-
-    // 通过conf_threshold过滤不合格的grid, unsqueeze(2)
-    auto conf_mask = prediction.index({ torch::indexing::Ellipsis, 4 }).ge(conf_thres);   // {torch::indexing::Ellipsis, 4} = {"...", 4}
-    //std::cout << "conf_mask 0 : " << conf_mask.sizes() << std::endl;
-    conf_mask = conf_mask.unsqueeze(2);
-    //std::cout << "conf_mask 1 : " << conf_mask.sizes() << " prediction: " << prediction.sizes() << std::endl;
-
-    auto det = torch::masked_select(prediction[0], conf_mask[0]).view({ -1, nc + item_attr_size });
-    //std::cout << "conf select result: det size = " << det.sizes() << std::endl;
-
-    if (0 == det.size(0))
-    {
-        std::cout << "none detections remain after compare with conf_thres." << std::endl;
-        return 0;
-    }
-
-    // compute overalll score obj_conf * cls_conf x[:5 : 85] *  
-    det.slice(1, item_attr_size, nc+ item_attr_size) *= det.select(1, 4).unsqueeze(1);
-
-    auto box = xywh2xyxy(det.slice(1, 0, 4));   // 最后一维85个变量前四个存着的是xc, yc, w, h ==>x1, y1, x2, y2
-    
-    std::tuple<torch::Tensor, torch::Tensor> max_classes = torch::max(det.slice(1, item_attr_size, nc + item_attr_size), 1);  //从第6个位置找到那一个class的score值最大
-
-    auto max_conf_score = std::get<0>(max_classes);     // 类置信度
-    auto max_conf_index = std::get<1>(max_classes);     // 位置=类别索引值 
-
-    max_conf_score = max_conf_score.to(torch::kFloat).unsqueeze(1);
-    max_conf_index = max_conf_index.to(torch::kFloat).unsqueeze(1);
-
-    // shape: n * 6, top-left x/y (0,1), bottom-right x/y (2,3), score(4), class index(5)
-    det = torch::cat({ box.slice(1, 0, 4), max_conf_score, max_conf_index }, 1);
-    //std::cout << "det selected boxes size: " << det.sizes() << std::endl;
-
-    constexpr int max_wh = 4096;
-    auto c = det.slice(1, item_attr_size, item_attr_size + 1) * max_wh;
-    auto offset_box = det.slice(1, 0, 4) + c;
-    //std::cout << "offset_box " << offset_box.sizes() << " c " << c.sizes() << std::endl;
-
-    // 将数据拷贝到CPU，因为nms计算在CPU上
-    auto offset_box_cpu = offset_box.cpu();
-    auto det_cpu = det.cpu();
-
-
-    const auto det_cpu_array = det_cpu.accessor<float, 2>();
-    auto Tensor2Detection = [](const at::TensorAccessor<float, 2>& offset_boxes,
-        const at::TensorAccessor<float, 2>& det,
-        std::vector<cv::Rect>& offset_box_vec,
-        std::vector<float>& score_vec) {
-            for (int i = 0; i < offset_boxes.size(0); i++) {
-                offset_box_vec.emplace_back(
-                    cv::Rect(cv::Point(offset_boxes[i][0], offset_boxes[i][1]),
-                        cv::Point(offset_boxes[i][2], offset_boxes[i][3]))
-                );
-                score_vec.emplace_back(det[i][4]);
-            }
-        };
-    // use accessor to access tensor elements efficiently
-    std::vector<cv::Rect> offset_box_vec;
-    std::vector<float> score_vec;
-    Tensor2Detection(offset_box_cpu.accessor<float, 2>(), det_cpu_array, offset_box_vec, score_vec);
-
-    // run NMS
-    std::vector<int> nms_indices;
-    cv::dnn::NMSBoxes(offset_box_vec, score_vec, conf_thres, iou_thres, nms_indices);
-    std::cout << "After cv::dnn::NMSBoxes: " << nms_indices.size() << std::endl;
-
-    for (int index : nms_indices) {
-        Detection t;
-        const auto& b = det_cpu_array[index];
-
-        std::cout << " index: " << index << std::endl;
-        std::cout << "     box " << b[0] << " " << b[1] << " - " << b[2] << " " << b[3] 
-                    << " score: " << det_cpu_array[index][4] 
-                    << " object id: " << det_cpu_array[index][5] << std::endl;
-
-        t.bbox =
-            cv::Rect(cv::Point(b[0], b[1]),
-                cv::Point(b[2], b[3]));
-        t.score = det_cpu_array[index][4];
-        t.class_idx = det_cpu_array[index][5];
-        output.emplace_back(t);
-    }
-
-    return output.size();
 }
 
 /*
@@ -440,7 +334,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         torch::AutoGradMode enable_grad(false);
         //torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
         std::string str_name = param.key();
-        
+        //std::cout << "model named_parameters: " << str_name << std::endl;
         //  "model-1.m-1.bn1.bias" ==> "model.1.m.1.bn1.bias
         str_name = std::regex_replace(str_name, std::regex("-"), ".");
         
@@ -463,111 +357,8 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         }
         n_params += 1;
     }
-    std::cout <<"Load jit parameters total: " << jit_params_count << " Model parameters totals: " << n_params << " trans_count: " << count_changes << " paramterss." << std::endl;
+    std::cout <<"Load jit parameters total: " << jit_params_count << " Model parameters total: " << n_params << " trans_count: " << count_changes << " paramters." << std::endl;
     return count_changes;
-}
-
-// void save_checkpoint(
-//     torch::nn::Module& model,
-//     torch::optim::Optimizer& optimizer,
-//     int epoch,
-//     const std::string& path) 
-// {
-//     //torch::serialize::OutputArchive ckpt;
-
-//     auto dir = std::filesystem::path(path).has_parent_path() ? std::filesystem::path(path).parent_path().string() : "./";
-
-//     //torch::serialize::OutputArchive model_out;
-//     if(model.parameters().begin()->device().type()!=torch::kCPU)
-//     {
-//         std::cout << "Model not run in CPU, save model stipulation as CPU" << std::endl;
-//         model.to(torch::kCPU);
-//     }
-//     //model.save(model_out);
-//     //model_out.save_to(path);
-//     torch::save(model, path);
-//     // 据说序列化存储优化器时，再次调入后在调用step()时会报错
-    
-    
-//     // torch::serialize::OutputArchive optim_out;
-//     // optimizer.save(optim_out);
-//     // auto optim_file = std::filesystem::path(dir).append("last_optm.pt").string();
-//     // optim_out.save_to(optim_file);
-
-//     auto epoch_file = std::filesystem::path(dir).append("last_epoch.txt").string();
-//     std::ofstream fs(epoch_file);
-//     if (fs.is_open())
-//     {
-//         fs.clear();
-//         fs << epoch;
-//         fs.close();
-//     }
-// }
-
-// bool load_checkpoint(const std::string& path, torch::nn::Module* model,
-//     torch::optim::Optimizer* optimizer,
-//     int epoch)
-// {
-//     auto check_file_exists = [](std::string file) {
-//         return std::filesystem::exists(std::filesystem::path(file));
-//         };
-
-//     auto dir = std::filesystem::path(path).has_parent_path() ? std::filesystem::path(path).parent_path().string() : "./";
-//     auto optim_file = std::filesystem::path(dir).append("last_optm.pt").string();
-//     auto epoch_file = std::filesystem::path(dir).append("last_epoch.txt").string();
-
-//     if (!check_file_exists(path) || !check_file_exists(optim_file) || !check_file_exists(epoch_file))
-//     {
-//         std::cout << "model, optimizer, epoch file not found in dir: " << dir << std::endl;
-//         return false;
-//     }
-
-
-//     try {
-
-//         //torch::serialize::InputArchive model_in;
-//         //model_in.load_from(path);
-//         //std::cout << "load model file " << path <<" over." << std::endl;
-//         if(model->parameters().begin()->device().type()!=torch::kCPU)
-//         {
-//             std::cout << "Model not run in CPU, save model stipulation as CPU" << std::endl;
-//             model->to(torch::kCPU);
-//         }
-//         //model->load(model_in);
-//         torch::load(model, path);
-//         std::cout << "load model parameters from " << path << " ok." << std::endl;
-
-//         // 据说序列化存储优化器时，再次调入后在调用step()时会报错
-//         /*
-//         torch::serialize::InputArchive optim_in;
-//         optim_in.load_from(optim_file);
-//         optimizer->load(optim_in);
-//         std::cout << "load optimizer parameters from " << path << " ok." << std::endl;
-//         */
-//         std::ifstream fs(epoch_file);
-//         if (fs.is_open())
-//         {
-//             fs >> epoch;
-//             std::cout << "load last train end epoch : " << epoch << std::endl;
-//             fs.close();
-//         }
-//     }
-//     catch (const c10::Error& e)
-//     {
-//         LOG(ERROR) << "load fail: " << e.what();
-//         return false;
-//     }
-
-//     return true;
-// }
-
-std::tuple<std::string, std::string> get_checkpoint_files(const std::string& path)
-{
-    auto dir = std::filesystem::path(path).has_parent_path() ? std::filesystem::path(path).parent_path().string() : "./";
-    auto optim_file = std::filesystem::path(dir).append("last_optm.pt").string();
-    auto epoch_file = std::filesystem::path(dir).append("last_epoch.txt").string();
-
-    return {optim_file, epoch_file};
 }
 
 void init_torch_seek(int seed/* = 0*/)
@@ -649,25 +440,5 @@ float random_uniform(float start/* = 0.0f*/, float end/* = 1.0f*/)
 	std::uniform_real_distribution<> dis(start, end);
 
 	return dis(gen);
-}
-
-
-void MatDrawTargets(cv::Mat& img, const torch::Tensor& labels, bool xywh , bool is_scale,  int start_idx)
-{
-    int nt = labels.size(0);
-
-    auto labels_xyxy = labels;
-    if(xywh)
-        labels_xyxy  = is_scale ? xywhn2xyxy(labels.index({"...", torch::indexing::Slice(start_idx, start_idx+4)}), img.cols, img.rows) : xywh2xyxy(labels);
-
-    for(int i = 0; i < nt; i++)
-    {
-        int x1 = labels_xyxy[i][0].item().toInt();
-        int y1 = labels_xyxy[i][1].item().toInt();
-        int x2 = labels_xyxy[i][2].item().toInt();
-        int y2 = labels_xyxy[i][3].item().toInt();
-        auto colors = SingletonColors::getInstance();
-        rectangle(img, cv::Point(x1, y1), cv::Point(x2, y2), colors->get_color_scalar(int(labels[i][start_idx-1].item().toInt())), 2);
-    }
 }
 

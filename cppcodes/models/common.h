@@ -27,7 +27,8 @@ private:
     int padding;
 
     bool fused = false;
-
+    bool bfirst = true;
+    
     void Init_Modules(int c1, int c2, int k, int s = 1, int p = -1);
 //    torch::nn::Sequential conv;
     torch::nn::Conv2d conv{ nullptr };
@@ -46,7 +47,6 @@ class BottleneckImpl : public torch::nn::Module
 public:
     explicit BottleneckImpl(int c1, int c2, bool shortcut, float e);
     // 暂时还不需要，只由C3调用
-    torch::Tensor forward(std::vector<torch::Tensor> x);
     torch::Tensor forward(torch::Tensor x);
     int get_outchannels(){return out_ch;};
 private:
@@ -59,6 +59,37 @@ private:
     Conv cv2;
 };
 TORCH_MODULE(Bottleneck);
+
+/*
+    CSP bottleneck layer for feature extraction with cross-stage partial connections and optional shortcuts.
+*/
+class BottleneckCSPImpl : public BaseModule
+{
+public:
+    BottleneckCSPImpl(){};
+    ~BottleneckCSPImpl(){};
+    void Init_Modules(int c1, int c2, int n = 1, bool shortcut_ = true, int g=1, float e = 0.5);
+
+    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
+    torch::Tensor forward(std::vector<torch::Tensor> x) override;
+    torch::Tensor forward(torch::Tensor x) override;
+    int get_outchannels() override {return out_ch;} ;
+    void check_args(std::vector<arg_complex>& args);
+private:
+    int in_ch;
+    int out_ch;
+    bool number;
+    float expansion;
+
+    Conv cv1;
+    torch::nn::Conv2d cv2{nullptr};
+    torch::nn::Conv2d cv3{nullptr};
+    Conv cv4;
+    torch::nn::BatchNorm2d bn{nullptr};
+    torch::nn::SiLU act{nullptr};
+    torch::nn::Sequential m; 
+};
+TORCH_MODULE(BottleneckCSP);
 
 /*
     # CSP Bottleneck with 3 convolutions
@@ -84,12 +115,10 @@ private:
 
     void Init_Modules(int c1, int c2, int n=1, bool shortcut=true, float e=0.5);
 
-
     Conv cv1;
     Conv cv2;
     Conv cv3;
-    // torch::nn::Sequential m; //不好自控命名规则
-    std::vector<Bottleneck> bottlenecks;
+    torch::nn::Sequential m; 
 };
 TORCH_MODULE(C3);
 
@@ -207,3 +236,57 @@ private:
 TORCH_MODULE(Focus);
 
 
+class ContractImpl : public BaseModule
+{
+public:
+    ContractImpl(){};
+    ~ContractImpl(){};
+    
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
+    torch::Tensor forward(std::vector<torch::Tensor> x) override;
+    torch::Tensor forward(torch::Tensor x) override;    
+    int get_outchannels() override {return out_ch;}
+
+    int in_ch;
+    int out_ch;
+    int gain;
+};
+TORCH_MODULE(Contract);
+
+class ExpandImpl : public BaseModule
+{
+public:
+    ExpandImpl(){};
+    ~ExpandImpl(){};
+    
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
+    torch::Tensor forward(std::vector<torch::Tensor> x) override;
+    torch::Tensor forward(torch::Tensor x) override;    
+    int get_outchannels() override {return out_ch;}
+
+    int in_ch;
+    int out_ch;
+    int gain;
+};
+TORCH_MODULE(Expand);
+
+
+// # Standard bottleneck
+// # ch_in, ch_out, shortcut, groups, expansion
+class ProtoImpl : public torch::nn::Module
+{
+public:
+    explicit ProtoImpl(int c1, int c_ = 256, int c2 = 32);
+    // 暂时还不需要，只由C3调用
+    torch::Tensor forward(torch::Tensor x);
+    int get_outchannels(){return out_ch;};
+private:
+    int in_ch;
+    int out_ch;
+
+    Conv cv1;
+    Conv cv2;
+    Conv cv3;
+    torch::nn::Upsample upsample{nullptr};
+};
+TORCH_MODULE(Proto);
