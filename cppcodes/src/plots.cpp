@@ -58,15 +58,30 @@ cv::Mat convert_tensor_to_mat(torch::Tensor img,
      int img_width, int img_height, int channels, bool ret_color)
 {
     if(channels == 3)
+    {
         img = img.detach().permute({1, 2, 0});
+        img = img.to(torch::kU8);
+    }
+    else if(channels == 1)
+    {
+        img = img.detach();
+        img = img.to(torch::kU8);
+    }
+    else
+    {
+        LOG(ERROR) << "only support [c, h, w] or [h, w] type tensor";
+        if(ret_color)
+            return cv::Mat::zeros(img_width, img_height, CV_8UC3);
+        return cv::Mat::zeros(img_width, img_height, CV_8UC1);
+    }
 
-    img = img.to(torch::kU8);
 
     //std::cout << "img size: " << img.sizes() << std::endl;
     cv::Mat mat;
     std::vector<cv::Mat> mat_mono;
     if(channels == 1) {
-        cv::Mat m_c(img_height, img_width, CV_8UC1, img.data_ptr());
+        auto m_c = cv::Mat(img_height, img_width, CV_8UC1);
+        std::memcpy((void*)m_c.data, img.data_ptr(), sizeof(torch::kByte)*img.numel());
 
         if(ret_color == false)
             return m_c;
@@ -88,7 +103,7 @@ cv::Mat convert_tensor_to_mat(torch::Tensor img,
     return mat;
 }
 
-void plot_labels(cv::Mat& img, torch::Tensor targets, int img_idx, int line_thickness=3)
+void plot_labels(cv::Mat& img, torch::Tensor targets, int img_idx, int line_thickness/*=3*/)
 {
     int img_width = img.cols;
     int img_height = img.rows;

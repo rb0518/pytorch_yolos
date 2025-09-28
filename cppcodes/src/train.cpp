@@ -63,181 +63,19 @@ void save_checkpoint(std::string filename, torch::nn::Module* model,
     ckpt_out.save_to(filename);
 }
 
-/*
-std::function<float(float)> one_cycle(float y1, float y2, int steps) {
-    return [y1, y2, steps](float x) {
-        return ((1 - std::cos(x * M_PI / steps)) / 2) * (y2 - y1) + y1;
-        };
-}
-*/
-std::function<float(int)> create_lr_lambda(bool linear_lr, float lrf, int epochs) {
-    if (linear_lr) {
-        // 线性插值
-        return [lrf, epochs](int x) -> float {
-            return (1.0f - static_cast<float>(x) / (epochs - 1)) * (1.0f - lrf) + lrf;
-            };
-    }
-    else {
-        // 余弦插值
-        return [lrf, epochs](int x) -> float {
-            return ((1 - std::cos(x * M_PI / epochs)) / 2) * (lrf - 1) + 1;
-            };
-    }
-}
-
-void train(const std::string& _root, 
-    VariantConfigs& hyp,
-	VariantConfigs& opt,
-    torch::Device& device,
-    const std::string& jit_script_file
-)
+std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<Model> ptr_model, VariantConfigs& opt, VariantConfigs& hyp)
 {
-    show_cfg_info("opt", opt);
-    show_cfg_info("hyp", hyp);
-
-    std::cout << "\x1b[31m" << "Device: " << "\x1b[0m" << device.type() << std::endl;
-
-/*
-    logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
-    save_dir, epochs, batch_size, total_batch_size, weights, rank = \
-        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
-*/
-    auto save_dir = std::filesystem::path(_root).append(std::get<std::string>(opt["save_dir"])).string();
-    std::cout << "\x1b[31m" << "Save dir: " << "\x1b[0m" << save_dir << std::endl;
-    auto epochs = std::get<int>(opt["epochs"]);
-    auto batch_size = std::get<int>(opt["batch_size"]);
-    auto total_batch_size = std::get<int>(opt["total_batch_size"]);
-    auto weights = std::get<std::string>(opt["weights"]);
-
-    if(std::filesystem::path(weights).stem().string() != "last")
-    {   // optim和weight分开保存了，所以有多个pt文件
-        weights = std::filesystem::path(weights).parent_path().append("last.pt").string();
-        opt["weights"] = weights;
-    }
-
-    //auto global_rank = std::get<int>(opt["global_rank"]);
-
-    // Directories
-    auto [last, best, results_file] = create_dirs(save_dir);
-    std::cout << " last: " << last /*<< " best: " << best*/ << " results: " << results_file << std::endl;
-
-    // Save run settings
-    auto hyp_file = std::filesystem::path(save_dir).append("hyp.yaml").string();
-    save_cfg_yaml(hyp, hyp_file);
-    auto opt_file = std::filesystem::path(save_dir).append("opt.yaml").string();
-    save_cfg_yaml(opt, opt_file);
-    
-    // Configure
-    auto plots = std::get<bool>(opt["evolve"]) == false;
-    auto cuda = device.type() == torch::kCUDA;
-    init_torch_seek(2 + std::get<int>(opt["local_rank"])); // default init_seed(1)
-    
-    auto data_file = std::filesystem::path(_root).append(std::get<std::string>(opt["data"])).string();
-    std::vector<std::string> names;
-    std::string train_path;
-    std::string val_path;
-    if (std::filesystem::exists(std::filesystem::path(data_file)))
-    {       
-        read_data_yaml(data_file, train_path, val_path, names); // 对应两种yaml定义，list和map
-    }
-    else
-    {
-        LOG(ERROR) << "not found you offer data yaml file: " << data_file;
-    }
-    auto is_coco = data_file.substr(data_file.length() - 10, data_file.length() - 1) == "coco.yaml";
-    auto nc = (std::get<bool>(opt["single_cls"])) ? 1 : names.size();
-
-    if (std::get<bool>(opt["single_cls"]))
-    {
-        names.clear();
-        names.emplace_back("item");
-    }    
-
-    if (names.size() != nc)
-    {   // 不用glog CHECK或assert的原因是程序会因异常直接退出
-        LOG(WARNING) << "names found in " << data_file << " items, but not equil the nc: " << nc << std::endl;
-    }
-
-    auto pretrained = std::filesystem::path(weights).extension().string() == ".pt"  && 
-        std::filesystem::exists(std::filesystem::path(_root).append(weights));
-    auto imgsz = std::get<std::vector<int>>(opt["img_size"])[0];//auto imgsz = 
-    auto imgsz_test = std::get<std::vector<int>>(opt["img_size"])[1];
-
-    auto cfg_file = std::get<std::string>(opt["cfg"]);
-    if(cfg_file=="")
-    {
-        LOG(WARNING) << "cfg not define, use default sets yolov5s.yaml";
-        cfg_file = std::filesystem::path(_root).append("models/yolov5s.yaml").string();
-    }
-    else
-        cfg_file = std::filesystem::path(_root).append(cfg_file).string();
-
-    // onst std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo
-    std::shared_ptr<Model> ptr_model = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false); // data_dict["anchors"].as<std::vector<float>>());
     auto model = ptr_model->get();
-    model->show_modelinfo();
-    model->to(device);
-
-    bool resume_load_ok = false;
-    int start_epoch = 0;
-    int last_ni = 0;
-    float last_lr = std::get<float>(hyp["lr0"]);
-    torch::serialize::InputArchive ckpt_in;
-    if(jit_script_file!= ""){
-        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << jit_script_file << std::endl;
-        if(std::filesystem::exists(std::filesystem::path(_root).append(jit_script_file)))
-        {
-            auto jit_file = std::filesystem::path(_root).append(jit_script_file).string();
-            LoadWeightFromJitScript(jit_file, *model, true);
-        }
-        else{
-            LOG(WARNING) << "load " << std::filesystem::path(_root).append(jit_script_file).string() << "not exist.";
-        }
-    }
-    else if(std::get<bool>(opt["resume"]) && pretrained)
-    {
-        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << weights;
-        std::string ckpt_path = std::filesystem::path(_root).append(weights)./*parent_path().append("ckpt.pt").*/string();
-        ckpt_in.load_from(ckpt_path); // model optim epoch
-        torch::serialize::InputArchive model_in;
-        if (ckpt_in.try_read("model", model_in))
-        {
-            model->load(model_in);
-            // ??? python中是有选择读取，同时排除了anchor，也就是这两个named_buffers，但实际读取出来比较，值是一样的，后续添加再次初始化这两个值 
-
-            resume_load_ok = true;
-        }
-        if(resume_load_ok) 
-            std::cout << " Over. " << std::endl;
-        else
-            std::cout << " wrong..." << std::endl;
-    }
-    else{
-        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << "None" << std::endl;
-    }
-
-    std::vector<std::string> freeze;    //原代码这里也没有处理初始化队列, 应该对应的是opt["freeze"]的层数
-    for (auto p : model->named_parameters())
-    {
-        p.value().requires_grad_(true);
-
-        if (std::count(freeze.begin(), freeze.end(), p.key()) > 0)
-        {
-            std::cout << "freezing " << p.key() << std::endl;
-            p.value().requires_grad_(false);
-        }
-    }
-
-    // Optimizer
     const int nbs = 64;
+    int batch_size = std::get<int>(opt["batch_size"]);
     int accumulate = std::max(static_cast<int>(std::round(nbs / batch_size)), 1);
-   
     float lr0 = std::get<float>(hyp["lr0"]);
     float momentum = std::get<float>(hyp["momentum"]);
     float weight_decay = std::get<float>(hyp["weight_decay"]);
     weight_decay = weight_decay * float(batch_size * accumulate / nbs);
-    std::vector<torch::Tensor> pg0, pg1, pg2;
 
+    std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
+    std::vector<torch::Tensor> pg0, pg1, pg2;
     //std::cout << "model named_modules size: " << model->named_modules("", false).size() << std::endl;
     for (const auto& module : model->named_children()) 
     {
@@ -256,8 +94,6 @@ void train(const std::string& _root,
         }
     }
 
-    std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
-    std::cout << "\033[33m" << "Optimizer: " << "\033[37m";
     if (std::get<bool>(opt["adam"]))
     {
          
@@ -313,11 +149,166 @@ void train(const std::string& _root,
     std::cout << "optimizer with  groups pg1: " << pg1.size() << " weight(decay=0.0), pg0: "
         << pg0.size() << " weight(decay= " << weight_decay << ") pg2 (bias): "
         << pg2.size() << std::endl;
+    
+    return {optimizer, accumulate, lr0};
+}
+
+std::function<float(int)> create_lr_lambda(bool linear_lr, float lrf, int epochs) {
+    if (linear_lr) {
+        // 线性插值
+        return [lrf, epochs](int x) -> float {
+            return (1.0f - static_cast<float>(x) / (epochs - 1)) * (1.0f - lrf) + lrf;
+            };
+    }
+    else {
+        // 余弦插值
+        return [lrf, epochs](int x) -> float {
+            return ((1 - std::cos(x * M_PI / epochs)) / 2) * (lrf - 1) + 1;
+            };
+    }
+}
+
+void train(const std::string& _root, 
+    VariantConfigs& hyp,
+	VariantConfigs& opt,
+    torch::Device& device,
+    const std::string& jit_script_file
+)
+{
+    show_cfg_info("opt", opt);
+    show_cfg_info("hyp", hyp);
+
+    std::cout << ColorString("Device: ", "Info") << device.type() << std::endl;
+    auto save_dir = std::filesystem::path(_root).append(std::get<std::string>(opt["save_dir"])).string();
+    std::cout << ColorString("Save dir: ", "Info") << save_dir << std::endl;
+    auto epochs = std::get<int>(opt["epochs"]);
+    auto batch_size = std::get<int>(opt["batch_size"]);
+    auto total_batch_size = std::get<int>(opt["total_batch_size"]);
+    auto weights = std::get<std::string>(opt["weights"]);
+
+    if(std::filesystem::path(weights).stem().string() != "last")
+    {   // optim和weight分开保存了，所以有多个pt文件
+        weights = std::filesystem::path(weights).parent_path().append("last.pt").string();
+        opt["weights"] = weights;
+    }
+    // Directories
+    auto [last, best, results_file] = create_dirs(save_dir);
+    std::cout << " last: " << last /*<< " best: " << best*/ << " results: " << results_file << std::endl;
+
+    // Save run settings
+    auto hyp_file = std::filesystem::path(save_dir).append("hyp.yaml").string();
+    save_cfg_yaml(hyp, hyp_file);
+    auto opt_file = std::filesystem::path(save_dir).append("opt.yaml").string();
+    save_cfg_yaml(opt, opt_file);
+    
+    // Configure
+    auto plots = std::get<bool>(opt["evolve"]) == false;
+    auto cuda = device.type() == torch::kCUDA;
+    init_torch_seek(2 + std::get<int>(opt["local_rank"])); // default init_seed(1)
+    
+    auto data_file = std::filesystem::path(_root).append(std::get<std::string>(opt["data"])).string();
+    std::vector<std::string> names;
+    std::string train_path;
+    std::string val_path;
+    if (std::filesystem::exists(std::filesystem::path(data_file)))
+    {       
+        read_data_yaml(data_file, train_path, val_path, names); // 对应两种yaml定义，list和map
+    }
+    else
+    {
+        LOG(ERROR) << "not found you offer data yaml file: " << data_file;
+    }
+    auto is_coco = data_file.substr(data_file.length() - 10, data_file.length() - 1) == "coco.yaml";
+    auto nc = (std::get<bool>(opt["single_cls"])) ? 1 : names.size();
+
+    if (std::get<bool>(opt["single_cls"]))
+    {
+        names.clear();
+        names.emplace_back("item");
+    }    
+
+    if (names.size() != nc)
+    {   // 不用glog CHECK或assert的原因是程序会因异常直接退出
+        LOG(WARNING) << "names found in " << data_file << " items, but not equil the nc: " << nc << std::endl;
+    }
+
+    auto pretrained = std::filesystem::path(weights).extension().string() == ".pt"  && 
+        std::filesystem::exists(std::filesystem::path(_root).append(weights));
+    auto imgsz = std::get<std::vector<int>>(opt["img_size"])[0];//auto imgsz = 
+    auto imgsz_test = std::get<std::vector<int>>(opt["img_size"])[1];
+
+    auto cfg_file = std::get<std::string>(opt["cfg"]);
+    if(cfg_file=="")
+    {
+        LOG(WARNING) << "cfg not define, use default sets yolov5s.yaml";
+        cfg_file = std::filesystem::path(_root).append("models/yolov5s.yaml").string();
+    }
+    else
+        cfg_file = std::filesystem::path(_root).append(cfg_file).string();
+
+    std::shared_ptr<Model> ptr_model = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false); 
+    auto model = ptr_model->get();
+    model->show_modelinfo();
+    model->to(device);
+
+    bool resume_load_ok = false;
+    int start_epoch = 0;
+    int last_ni = 0;
+    float last_lr = std::get<float>(hyp["lr0"]);
+    torch::serialize::InputArchive ckpt_in;
+    if(jit_script_file!= ""){
+        std::cout << ColorString("Load pretrain weights: ", "Info") << jit_script_file << std::endl;
+        if(std::filesystem::exists(std::filesystem::path(_root).append(jit_script_file)))
+        {
+            auto jit_file = std::filesystem::path(_root).append(jit_script_file).string();
+            LoadWeightFromJitScript(jit_file, *model, true);
+        }
+        else{
+            LOG(WARNING) << "load " << std::filesystem::path(_root).append(jit_script_file).string() << "not exist.";
+        }
+    }
+    else if(std::get<bool>(opt["resume"]) && pretrained)
+    {
+        std::cout << ColorString("Load pretrain weights: ", "Info") << weights;
+        std::string ckpt_path = std::filesystem::path(_root).append(weights)./*parent_path().append("ckpt.pt").*/string();
+        ckpt_in.load_from(ckpt_path); // model optim epoch
+        torch::serialize::InputArchive model_in;
+        if (ckpt_in.try_read("model", model_in))
+        {
+            model->load(model_in);
+            resume_load_ok = true;
+            std::cout << " Over. " << std::endl;
+        }
+        if(!resume_load_ok) 
+            std::cout << " wrong..." << std::endl;
+    }
+    else{
+        std::cout << "\033[33m" << "Load pretrain weights: " << "\033[37m" << "None" << std::endl;
+    }
+
+    std::vector<std::string> freeze;    //原代码这里也没有处理初始化队列, 应该对应的是opt["freeze"]的层数
+    for (auto p : model->named_parameters())
+    {
+        p.value().requires_grad_(true);
+
+        if (std::count(freeze.begin(), freeze.end(), p.key()) > 0)
+        {
+            std::cout << "freezing " << p.key() << std::endl;
+            p.value().requires_grad_(false);
+        }
+    }
+
+    // Optimizer
+    std::cout << ColorString("Optimizer: ", "Info");
+    int accumulate = 1;
+    float lr0 = 0.02;
+    int nbs = 64;
+    std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
+    std::tie(optimizer, accumulate, lr0) = smart_optimizer(ptr_model, opt, hyp);
     // Resume
     auto best_fitness = 0.0;
 
     //auto ema = ModelEMA(ptr_model);
-
     if (resume_load_ok)
     {
         // optimizer
@@ -344,12 +335,6 @@ void train(const std::string& _root,
                 optimizer->load(optim_in);
                 std::cout << "optimizer->load() over... " << std::endl;
             }
-          
-            // for (auto& params : optimizer->param_groups())
-            // {
-            //     std::cout << params.options().get_lr() << std::endl;
-            // }
-
             std::cout << std::endl;
         }
 
@@ -364,48 +349,25 @@ void train(const std::string& _root,
     }
 
     auto lr_lambda = create_lr_lambda(std::get<bool>(opt["linear_lr"]), std::get<float>(hyp["lrf"]), epochs);
-    // Libtorch中没有像pytorch中一样提供了多种lr_scheduler，只能自己继承LRScheduler，将lr_lambda放入到类中
-    // 移动到下面来，就可以直接取得最终optimizer中的lr0
     auto scheduler = LambdaLR(optimizer, 1.0, std::get<float>(hyp["lrf"]), epochs, std::get<bool>(opt["linear_lr"]), start_epoch); 
 
-
-    // Image sizes
     auto gs = std::max(32, model->get_stride_max()); // grid size (max stride)
-    auto nl = model->module_detect->nl;
-    // Trainloader
-    /*  
-        dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
-                                            world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
-    nb = len(dataloader)  # number of batches
-    */
+    auto nl = model->last_module->nl;
+
     bool augment = true;
     bool rect = std::get<bool>(opt["rect"]);
-    bool image_weights = std::get<bool>(opt["image_weights"]);
-    bool cache_images = std::get<bool>(opt["cache_images"]);
     float pad = 0.0f;
 
-
-    std::cout << "\033[33m" << "Train Datasets: " << "\033[37m" << train_path << std::endl;
-    std::shared_ptr<LoadImagesAndLabels> train_dataset = std::make_shared<LoadImagesAndLabels>(train_path, hyp, imgsz, batch_size, augment,
-                rect, image_weights, cache_images, nc == 1, gs, pad, "");
-    auto datasets = train_dataset->map(CustomCollate());
-
-    auto total_images = datasets.size();
-    int num_images = 0;
-    if (total_images.has_value())
-        num_images = *total_images;
-    auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-    auto dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-                std::move(datasets), dataloader_options);
-
-    std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << val_path << std::endl;                
-    std::shared_ptr<LoadImagesAndLabels> val_dataset = std::make_shared<LoadImagesAndLabels>(val_path, hyp, imgsz, batch_size * 2, false,
-        true, image_weights, cache_images, nc == 1, gs, 0.5f, "");
+    // create dataloader
+    std::cout << ColorString("Train Datasets: ", "Info") << train_path << std::endl;
+    auto [train_dataloaer, num_images] = create_dataloader(train_path, imgsz, nc, batch_size, gs,
+                                                            opt, hyp, augment, pad); 
+    
+    std::cout << ColorString("Test Datasets: ", "Info") << val_path << std::endl;
+    auto [val_dataloader, num_images_val] = create_dataloader(val_path, imgsz, nc, batch_size * 2, gs,
+                                                            opt, hyp, augment, pad, true);
     std::cout << " create dataloader over ...." << std::endl;
-    auto model_modules = model->module_detect;
+    auto model_modules = model->last_module;
 
     // no opt.resume，输出tensorboard， 
     // no opt.noautoanchors 因为并没有支持catch，所以暂时也不完成
@@ -443,12 +405,10 @@ void train(const std::string& _root,
         auto mloss = torch::zeros({4}).to(device).to(torch::kFloat);
 
         progressbar pbar(num_images/batch_size, 36);
-        // std::string s_done = "█";
-        // std::cout << s_done << "  length:"<< s_done.size() <<" " << s_done.length() << std::endl; 
         pbar.set_done_char(std::string("█"));
-        optimizer->zero_grad();
 
-        for (auto batch : *dataloader)
+        optimizer->zero_grad();
+        for (auto batch : *train_dataloaer)
         {
             torch::Tensor loss, loss_items;
             ni = idx + ((num_images / batch_size) + 1) * epoch;
@@ -527,7 +487,7 @@ void train(const std::string& _root,
 
             {   // {}是来限定 set_autocast_enabled（） 的作用域范围
                 at::autocast::set_autocast_enabled(torch::kCUDA, true);
-                auto [zeors, pred] = model->forward(imgs);
+                auto [zeros, pred, pred_mask] = model->forward(imgs);
                 std::tie(loss, loss_items) = compute_loss(pred, target.to(device));
                 if(std::get<bool>(opt["quad"]))
                     loss *= 4.f;
@@ -570,7 +530,8 @@ void train(const std::string& _root,
                 _root,
                 opt,
                 names,
-                val_dataset,
+                std::move(val_dataloader),
+                num_images_val,
                 "",
                 save_dir,
                 "",
@@ -603,7 +564,8 @@ void train(const std::string& _root,
             _root,
             opt,
             names,
-            val_dataset,
+            std::move(val_dataloader),
+            num_images_val,
             "",
             save_dir,
             weight_rel,
@@ -634,7 +596,7 @@ void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= ".
         { 1, input_image.rows, input_image.cols, 3 }).to(device);    // 补齐batch_size维
     input_tensor = input_tensor.permute({ 0, 3, 1, 2 }).contiguous();
 
-    auto [output_tensor, output_tensor_vec] = model->forward(input_tensor);// .toTuple()->elements()[0].toTensor();
+    auto [output_tensor, output_tensor_vec, output_tensor_pred_seg] = model->forward(input_tensor);// .toTuple()->elements()[0].toTensor();
     std::cout << "model forward return: " << output_tensor.sizes() << std::endl;
     // [1, 25200, 85]
     std::vector<torch::Tensor> bboxs;

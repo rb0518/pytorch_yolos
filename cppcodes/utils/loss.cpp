@@ -5,7 +5,7 @@
 #include <torch/torch.h>
 #include <cmath>
 
-ComputeLoss::ComputeLoss(Detect m, VariantConfigs& _hyp, bool autobalance/* = false*/)
+ComputeLoss::ComputeLoss(std::shared_ptr<DetectImpl> m, VariantConfigs& _hyp, bool autobalance/* = false*/)
 {
     this->_device = m->parameters()[0].device();
     if (this->_device.type() == torch::kCPU)

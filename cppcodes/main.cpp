@@ -265,7 +265,7 @@ int main(int argc, char* argv[])
             }
             else
             {
-                auto [pred , empty_v] = model->forward(input_tensor);
+                auto [pred , empty_v, pred_mask] = model->forward(input_tensor);
                 output_tensor = pred;
             }
             std::vector<torch::Tensor> bboxs;
@@ -340,8 +340,13 @@ int main(int argc, char* argv[])
         opt["save_period"] = FLAGS_save_period;
         opt["total_batch_size"] = FLAGS_batch_size;
 
-        std::string data_file = std::filesystem::path(root_path).append(FLAGS_data).string();            
 
+        torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0)
+            : torch::Device(torch::kCPU); //select_device(opt["device"], opt["batch_size"]);
+
+        int imgsz = FLAGS_img_size;
+
+        std::string data_file = std::filesystem::path(root_path).append(FLAGS_data).string();            
         std::vector<std::string> names;
         std::string train_path;
         std::string val_path;
@@ -351,12 +356,27 @@ int main(int argc, char* argv[])
         }
         else
         {
-            LOG(ERROR) << "not found you offer data yaml file: " << data_file;
+            std::cout << ColorString("not found you offer data yaml file: ", "Error");
         }
         auto is_coco = data_file.substr(data_file.length() - 10, data_file.length() - 1) == "coco.yaml";
         auto nc = (std::get<bool>(opt["single_cls"])) ? 1 : names.size();
 
-        std::cout << "\033[33m" << "Test Datasets: " << "\033[37m" << val_path << std::endl;    
+        auto cfg_file = std::get<std::string>(opt["cfg"]);
+        if(cfg_file=="")
+        {
+            LOG(WARNING) << "cfg not define, use default sets yolov5s.yaml";
+            cfg_file = std::filesystem::path(root_path).append("models/yolov5s.yaml").string();
+        }
+        else
+            cfg_file = std::filesystem::path(root_path).append(cfg_file).string();
+
+        std::cout << ColorString("cfg: ", "Info") << cfg_file << std::endl;
+        std::shared_ptr<Model> ptr_model = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false); 
+        auto model = ptr_model->get();
+        model->show_modelinfo();
+        model->to(device);
+
+        std::cout << ColorString("Test datasets: ", "G") << val_path << std::endl;    
         VariantConfigs hyp = set_cfg_hyp_default();
         bool augment = true;        // true && rect == false ==> mosaic = true
         bool rect = std::get<bool>(opt["rect"]);
@@ -364,24 +384,14 @@ int main(int argc, char* argv[])
         bool cache_images = false;
         int gs = 32;
         float pad = 0.5f;
-        int imgsz = FLAGS_img_size;
-        int batch_size = std::get<int>(opt["batch_size"]);
+        int batch_size = FLAGS_batch_size;
 
-        std::shared_ptr<LoadImagesAndLabelsAndMasks> val_load_datasets = std::make_shared<LoadImagesAndLabelsAndMasks>(val_path, 
-                                hyp, imgsz, batch_size, augment, rect, image_weights, cache_images, nc == 1, gs, pad, "");
-
-        std::cout << " create val datasets:  LoadImagesAndLabels over ...." << std::endl;
-        auto test_datasets = val_load_datasets->map(CustomCollateSeg());
-        auto total_images = test_datasets.size();
-        int num_images = 0;
-        if (total_images.has_value())
-            num_images = *total_images;
+        auto [val_dataloader, num_images] = create_dataloader_segment(train_path, imgsz, nc, batch_size, gs,
+                                                                opt, hyp, augment, pad, false, false, 1); 
         std::cout << "test dataset, total images: " << num_images << " batch_size: " << batch_size << std::endl;
-        auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-        auto val_dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-                std::move(test_datasets), dataloader_options);
         std::cout << "init dataloader over..." << std::endl;
-        progressbar pbar(num_images/batch_size, 36);
+        //progressbar pbar(num_images/batch_size, 36);
+        int batch_idx = 0;
         for (auto batch : *val_dataloader)
         {
             auto imgs = batch.data;
@@ -389,8 +399,23 @@ int main(int argc, char* argv[])
             auto masks = batch.mask;
             auto paths = batch.path;
             auto shapes = batch.shape;
-            pbar.update();
-            cv::waitKey();
+
+            std::cout << batch_idx << "  Input images: " << imgs.sizes() << " targets: " << targets.sizes() << " masks: " << masks.sizes() << std::endl;
+
+            int width = imgs.size(3);
+            int height = imgs.size(2);
+            int channel = imgs.size(1);
+            int bs = imgs.size(0);
+
+            imgs = imgs.to(torch::kFloat) / 255.f;
+            imgs = imgs.to(device);
+
+            auto [pred, v_train, pred_seg] = model->forward(imgs);
+
+            std::cout << batch_idx << "  Return vector_train: " << v_train[0].sizes() << " pred: " 
+                        << pred.sizes() << " pred_seg: " << pred_seg.sizes() << std::endl;
+            batch_idx += 1;
+            //pbar.update();
         }
         std::cout << std::endl;
     }

@@ -34,7 +34,8 @@ void test(
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
-    std::shared_ptr<LoadImagesAndLabels> val_datasets, // if not val, set = nullptr
+    Dataloader_Detect val_dataloader, // if not val, set = nullptr
+    int val_total_number,
     std::string val_path,
     std::string save_dir_,
     std::string weights = "",

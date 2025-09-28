@@ -372,7 +372,8 @@ VariantConfigs set_cfg_hyp_default()
 
 void show_cfg_info(const std::string& title, const VariantConfigs& cfgs)
 {
-    std::cout << "\x1b[31m" << title << ": " << "\x1b[0m";
+    
+    std::cout << ColorString(title, "Info");
     for (const auto& [key, value] : cfgs) 
     {
         std::cout << key << ": ";

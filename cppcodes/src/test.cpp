@@ -55,7 +55,8 @@ void test(
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
-    std::shared_ptr<LoadImagesAndLabels> val_datasets, // if not val, set = nullptr
+    Dataloader_Detect val_dataloader, // if not val, set = nullptr
+    int val_total_number,
     std::string val_path,
     std::string save_dir_,
     std::string weights /*= ""*/,
@@ -129,45 +130,30 @@ void test(
     iouv = iouv.to(device);
     auto niou = iouv.numel();
 
-    std::shared_ptr<LoadImagesAndLabels> val_load_datasets=nullptr;
-    if(val_datasets == nullptr)
+    std::shared_ptr<LoadImagesAndLabels> val_load_datasets{nullptr};
+    int num_images = 0;
+    if(val_dataloader == nullptr)
     {
-        std::cout << "val path: " << val_path << std::endl;
-        VariantConfigs hyp = set_cfg_hyp_default();
         bool augment = false;
         bool rect = true;
-        bool image_weights = false;
-        bool cache_images = false;
         int gs = 32;
         float pad = 0.5f;
-        val_load_datasets = std::make_shared<LoadImagesAndLabels>(val_path, hyp, imgsz, batch_size, augment,
-            rect, image_weights, cache_images, nc == 1, gs, pad, "");
-        std::cout << " create val datasets:  LoadImagesAndLabels over ...." << std::endl;
+        std::cout << "val path: " << val_path << std::endl;
+        VariantConfigs hyp = set_cfg_hyp_default();
+        std::tie(val_dataloader, num_images) = create_dataloader(val_path, imgsz, nc, batch_size, gs,
+                                                                opt, hyp, augment, pad, true); 
     }
-    else
-    {
-        val_load_datasets = std::move(val_datasets);
+    else{
+        num_images = val_total_number;
     }
-    auto test_datasets = val_load_datasets->map(CustomCollate());
-    auto total_images = test_datasets.size();
-    int num_images = 0;
-    if (total_images.has_value())
-        num_images = *total_images;
-    //std::cout << "test dataset, total images: " << num_images << " batch_size: " << batch_size << std::endl;
-    auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-    auto val_dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-                std::move(test_datasets), dataloader_options);
-    if(false == is_training)                
+    if(false == is_training)    
+    {            
         std::cout << "init dataloader over..." << std::endl;
-    if (is_training == false)
-    {
         auto tmp_tenosr = torch::zeros({ 1, 3, imgsz, imgsz }).to(device).to(torch::kFloat);
         model_ptr->forward(tmp_tenosr);
     }
 
     int seen = 0;
-    //auto confusion_matrix = ConfusionMatrix(nc);
-
     auto loss = torch::zeros({ 3 }).to(device);
 
     std::vector<std::vector<torch::Tensor>> stats;
@@ -198,7 +184,8 @@ void test(
         torch::NoGradGuard nograd;
         torch::Tensor out;
         std::vector<torch::Tensor> train_out;
-        std::tie(out, train_out) = model_ptr->forward(img);
+        torch::Tensor out_seg;
+        std::tie(out, train_out, out_seg) = model_ptr->forward(img);
         if (save_pred)
         {
             if (batch_i < 3)

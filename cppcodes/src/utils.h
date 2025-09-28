@@ -90,3 +90,25 @@ float random_beta(float alpha, float beta);
 float random_uniform(float start = 0.0f, float end = 1.0f);
 
 void init_torch_seek(int seed = 0);
+
+inline std::string ColorString(const std::string& info, const std::string& col ="")
+{
+/*    
+    \033[30m  # 设置前景色为黑色
+    \033[31m  # 设置前景色为红色
+    \033[32m  # 设置前景色为绿色
+    \033[33m  # 设置前景色为黄色
+    \033[34m  # 设置前景色为蓝色
+    \033[35m  # 设置前景色为品红
+    \033[36m  # 设置前景色为青色
+    \033[37m  # 设置前景色为白色
+*/
+    if(col == "G" || col =="Info")
+        return std::string("\033[32m"+info+"\033[37m");
+    else if(col == "Y" || col =="Warning")
+        return std::string("\033[33m"+info+"\033[37m");
+    else if(col == "R" || col =="Error")
+        return std::string("\033[31m"+info+"\033[37m");
+
+    return std::string("\033[34m"+info+"\033[37m");
+}

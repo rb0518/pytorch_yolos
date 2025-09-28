@@ -9,6 +9,8 @@
 #include "general.h"
 #include "augmentations.h"
 
+#include "plots.h"
+
 std::vector<std::string> img_format = { ".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng", ".webp", ".mpo" }; //acceptable image suffixes
 std::vector<std::string> vid_formats = { ".mov", ".avi", ".mp4", ".mpg", ".mpeg", ".m4v", ".wmv", ".mkv" };  // acceptable video suffixes
 
@@ -199,7 +201,6 @@ void copy_past(cv::Mat& im, torch::Tensor& labels, std::vector<torch::Tensor>& s
 				{
 					new_seg.push_back(w - x_coords[j].item<float>());
 					new_seg.push_back(y_coords[j].item<float>());
-
 					contour.push_back(cv::Point(w - x_coords[j].item<float>(), y_coords[j].item<float>()));
 				}
 				auto new_seg_tensor = torch::tensor(new_seg).view({ -1, 2 });
@@ -238,7 +239,7 @@ cv::Mat polygon2mask(cv::Size img_size, torch::Tensor& segment, int color = 1, i
 	}
 	cv::fillPoly(mask, polygons, cv::Scalar(color));
 
-	cv::imshow("poly fill", mask);
+	//cv::imshow("poly fill", mask);
 
 	int nh = img_size.height / ratio;
 	int nw = img_size.width / ratio;
@@ -253,7 +254,7 @@ torch::Tensor polygons2masks(cv::Size img_size, std::vector<torch::Tensor> segme
 	{
 		auto s = segments[i];
 		cv::Mat tmp_mat = polygon2mask(img_size, s, color, downsample_ratio);
-		auto tmp_tensor = torch::from_blob(tmp_mat.data, {tmp_mat.rows, tmp_mat.cols }, torch::kByte);
+		auto tmp_tensor = torch::from_blob(tmp_mat.data, {tmp_mat.rows, tmp_mat.cols }, torch::kByte).clone();
 		masks.push_back(tmp_tensor);
 	}
 	torch::Tensor ret;
@@ -276,19 +277,22 @@ torch::Tensor polygons2masks(cv::Size img_size, std::vector<torch::Tensor> segme
 */
 std::tuple<torch::Tensor, torch::Tensor> polygons2masks_overlap(cv::Size img_size, std::vector<torch::Tensor> segments, int downsample_ratio = 1)
 {
-	// 不进行判定处理，按最大的处理
-	torch::Tensor masks = torch::zeros({ img_size.height / downsample_ratio, img_size.width/downsample_ratio }, torch::TensorOptions().dtype(torch::kInt32));
-	std::vector<torch::Tensor> ms;
+	// 发现按原代码转换，最大面积的object没有mask，暂时找不到原因
 	std::vector<int64_t> areas;
+	std::vector<std::vector<cv::Point>> polygons;
 	for (int i = 0; i < segments.size(); i++)
 	{
 		auto s = segments[i];
-		cv::Mat tmp_mat = polygon2mask(img_size, s, 1, downsample_ratio);	// 1是为了保证压缩时还是0和1
-		auto tmp_tensor = torch::from_blob(tmp_mat.data, { tmp_mat.rows, tmp_mat.cols }, torch::kByte);
-		tmp_tensor = tmp_tensor.to(torch::kInt32);
-		ms.push_back(tmp_tensor);
+		std::vector<cv::Point> polygon;
+		auto x = s.select(1, 0);
+		auto y = s.select(1, 1);
 
-		areas.push_back(tmp_tensor.sum().item().toLong());
+		for (int i = 0; i < s.size(0); i++)
+		{
+			polygon.push_back(cv::Point(int(x[i].item().toFloat()), int(y[i].item().toFloat())));
+		}
+		polygons.push_back(polygon);
+		areas.push_back(cv::contourArea(polygon));
 	}
 	// 按面积大小排序
 	auto sort_tensor_1d = [](const torch::Tensor& input, bool descend = false) {
@@ -298,17 +302,21 @@ std::tuple<torch::Tensor, torch::Tensor> polygons2masks_overlap(cv::Size img_siz
 			return torch::flip(ascending_indices, 0);
 		return ascending_indices;
 		};
-	auto descend_indices = sort_tensor_1d(torch::tensor(areas, torch::TensorOptions().dtype(torch::kLong)));
 
-	// 根据面积排序，将图像填充到masks中
-	for (int i = 0; i < ms.size(); i++)
+	auto descend_indices = sort_tensor_1d(torch::tensor(areas, torch::TensorOptions().dtype(torch::kLong)));
+	
+	int ratio = std::max(1, downsample_ratio);
+	std::cout << segments.size() << " areas " << areas.size() << " segments: " << segments.size() << std::endl;
+	// 根据面积排序将图像填充到masks中
+	cv::Mat cv_mask = cv::Mat::zeros(img_size, CV_8UC1); 
+	for (int i = 0; i < descend_indices.size(0); i++)
 	{
 		int idx = descend_indices[i].item().toInt();
-		auto mask = ms[idx] * (i + 1);
-		masks = masks + mask;
-		masks.clamp_(0, i + 1);
+		std::cout << i << " descend: " << idx << std::endl;
+		cv::fillPoly(cv_mask, polygons[idx], cv::Scalar(std::min(255, i+1)));
 	}
-
+	cv::resize(cv_mask, cv_mask, cv::Size(img_size.width / ratio, img_size.height / ratio));
+	torch::Tensor masks = torch::from_blob(cv_mask.data, {cv_mask.rows, cv_mask.cols }, torch::kByte).clone();
 	return std::make_tuple(masks, descend_indices);
 }
 
@@ -497,13 +505,11 @@ std::tuple<std::string, std::string> Init_ImageAndLabel_List(std::string& path, 
 	return std::make_tuple(images_dir, labels_dir);
 }
 //========================   LoadImagesAndLabels ========================
-LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp, int _img_size, int _batch_size, 
-	bool _augment, bool _rect, bool _image_weights, bool _cache_images, bool _single_cls, int _stride, 
-	float _pad, std::string _prefix)
-	: img_size(_img_size), augment(_augment), image_weights(_image_weights), catch_images(_cache_images),
-	single_cls(_single_cls), stride(_stride), pad(_pad), path(_path)
+LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
+		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad)
+	: img_size(_img_size), augment(_augment), single_cls(_single_cls), stride(_stride), pad(_pad), path(_path)
 {
-	rect = image_weights ? false : _rect;
+	rect = /*image_weights ? false :*/ _rect;
 	mosaic = augment == true && rect == false;
 	//mosaic = false;
 	int half_size = static_cast<int>(std::trunc(float(img_size) / 2.0));
@@ -625,7 +631,7 @@ CustomExample LoadImagesAndLabels::get(size_t index)
 		if(random_uniform() < (std::get<float>(hyp["flipud"])))
 		{
 			cv::flip(img, img, 0);
-				labels.index_put_({torch::indexing::Slice(), 2},
+			labels.index_put_({torch::indexing::Slice(), 2},
 				1 - labels.index({torch::indexing::Slice(), 2})
 				);
 		}
@@ -770,13 +776,12 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic(int index)
 
 //========================   LoadImagesAndLabelsAndMasks ========================
 LoadImagesAndLabelsAndMasks::LoadImagesAndLabelsAndMasks(std::string _path, VariantConfigs _hyp,
-		int _img_size, int _batch_size, bool _augment,
-		bool _rect, bool _image_weights, bool _cache_images,
-		bool _single_cls, int _stride, float _pad, std::string _prefix)
-		: img_size(_img_size), augment(_augment), image_weights(_image_weights), catch_images(_cache_images),
-		single_cls(_single_cls), stride(_stride), pad(_pad), path(_path)
+		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad, 
+		bool _overlap, int _downsample_ratio)
+		: img_size(_img_size), augment(_augment), single_cls(_single_cls), stride(_stride), pad(_pad), path(_path),
+		overlap(_overlap), downsample_ratio(_downsample_ratio)
 {
-	rect = image_weights ? false : _rect;
+	rect = /*image_weights ? false :*/ _rect;
 	mosaic = augment == true && rect == false;
 	int half_size = static_cast<int>(std::trunc(float(img_size) / 2.0));
 	mosaic_border = { -half_size, -half_size };
@@ -817,6 +822,8 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			cv::Mat mixed_img = img1_float * r + img2_float * (1 - r);
 			mixed_img.convertTo(img, img.type());
 			// 两次label数据合并
+			if(labels.size(0) == 0||labels2.size(0) == 0)
+				std::cout << ColorString("labels is empty: ", "R") << " labels: " << labels.sizes() << " labels2: " << labels2.sizes() << std::endl;
 			labels = torch::cat({ labels, labels2 }, 0);
 			for (auto seg : segments2)
 				segments.push_back(seg);
@@ -854,7 +861,6 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 		{
 			auto seg_tmp = torch::tensor(lbs_segments[j]).view({-1, 2});
 			seg_tmp = xyn2xy(seg_tmp, w, h, padw, padh);
-			seg_tmp.clamp_(0, img_size);
 			segments.push_back(seg_tmp);
 			labels[j].index_put_({ torch::indexing::Slice() }, torch::tensor(bboxs[j]));
 		}
@@ -862,7 +868,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 		auto converted = xywhn2xyxy(select_xyhw, w, h, pad[0], pad[1]);
 		labels.index_put_({ torch::indexing::Slice(), torch::indexing::Slice(1, 5) }, converted);
 	}
-
+	/*
 	auto img_show = img.clone();
 	cv::rectangle(img_show, cv::Point(padw, padh), cv::Point(padw + w, padh + h),
 		cv::Scalar(220, 0, 0), 2);
@@ -876,7 +882,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			cv::Scalar(220, 220, 0), 2);
 	}
 	cv::imshow("img", img_show);
-
+	*/
 	if(labels.size(0))
 	{
 		labels.index_put_({torch::indexing::Slice(), torch::indexing::Slice(1, 5)},
@@ -898,7 +904,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			labels = labels.index_select(0, tmp_indices);
 		}
 		else{
-			masks = polygons2masks(img.size(), segments, 114, downsample_ratio);
+			masks = polygons2masks(img.size(), segments, 1, downsample_ratio);
 		}
 	}
 
@@ -906,13 +912,19 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 	{
 		if (overlap)
 		{
+			std::cout << "overlap 插入空数据" << std::endl;
+			// masks = torch::zeros({ 1, img.cols / downsample_ratio, img.rows / downsample_ratio },
+			// 	torch::TensorOptions().dtype(torch::kInt32));
 			masks = torch::zeros({ 1, img.cols / downsample_ratio, img.rows / downsample_ratio },
-				torch::TensorOptions().dtype(torch::kInt32));
+				torch::TensorOptions().dtype(torch::kByte));
 		}
 		else 
 		{
-			masks = torch::zeros({ labels.size(0) , img.cols / downsample_ratio, img.rows / downsample_ratio },
-				torch::TensorOptions().dtype(torch::kInt32));
+			// masks = torch::zeros({ labels.size(0) , img.cols / downsample_ratio, img.rows / downsample_ratio },
+			// 	torch::TensorOptions().dtype(torch::kInt32));
+				std::cout << "overlap 插入空数据" << std::endl;
+				masks = torch::zeros({ labels.size(0) , img.cols / downsample_ratio, img.rows / downsample_ratio },
+				torch::TensorOptions().dtype(torch::kByte));
 		}
 	}
 
@@ -935,7 +947,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 				1 - labels.index({ torch::indexing::Slice(), 2 })
 			);
 
-			masks = torch::flip(masks, { 1 });	// [1, h, w] 1==> 垂直
+			masks = torch::flip(masks, 1);	// [1, h, w] 1==> 垂直
 
 		}
 		if (random_uniform() < (std::get<float>(hyp["fliplr"])))
@@ -945,7 +957,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 				1 - labels.index({ torch::indexing::Slice(), 1 })
 			);
 
-			masks = torch::flip(masks, { 2 });
+			masks = torch::flip(masks, 2);
 		}
 	}
 
@@ -1064,7 +1076,6 @@ std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>>
 		{
 			auto seg_tmp = torch::tensor(lbs_segments[j]).view({-1, 2});
 			seg_tmp = xyn2xy(seg_tmp, w, h, padw, padh);
-			seg_tmp.clamp_(0, 2 * img_size);
 			segments.push_back(seg_tmp);
 			label_tensor[j].index_put_({ torch::indexing::Slice() }, torch::tensor(bboxs[j]));
 		}
@@ -1076,6 +1087,11 @@ std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>>
 	}
 
 	// Concat labels
+	for(int i = 0 ; i < labels.size(); i++)
+	{
+		if(labels[i].size(0) == 0)
+			std::cout << ColorString("labels is empty: ", "R") << " labels4: " << i << " label: " << labels[i].sizes() << std::endl;
+	}
 	labels4 = torch::cat(labels, 0);
 	labels4.clamp_(0, 2 * img_size);
 	for(auto seg_tmp : segments)
@@ -1093,3 +1109,72 @@ std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>>
 
 	return std::make_tuple(aug_img4, aug_labels, aug_segment);
 }
+
+
+std::tuple<Dataloader_Detect, int> create_dataloader(
+						const std::string& path,
+                        int imgsz,
+						int nc,
+                        int batch_size,
+                        int stride,
+                        VariantConfigs& opt,
+                        VariantConfigs& hyp,
+                        bool augment,
+                        float pad, 
+						bool is_val)
+{
+	int gs = stride;
+	bool rect = is_val ? true : std::get<bool>(opt["rect"]);
+	bool quad = std::get<bool>(opt["quad"]);
+	bool single_cls = nc == 1 || std::get<bool>(opt["single_cls"]);	
+	auto datasets = LoadImagesAndLabels(path, 
+										hyp,			
+										imgsz, 
+										augment, 
+										rect, 
+										single_cls, 
+										gs, 
+										pad).map(CustomCollate());
+    int num_images = *(datasets.size());
+
+	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
+	Dataloader_Detect dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+                std::move(datasets), dataloader_options);
+	return std::make_tuple(std::move(dataloader), num_images);
+}
+
+std::tuple<Dataloader_Segment, int> create_dataloader_segment(
+						const std::string& path,
+                        int imgsz,
+						int nc,
+                        int batch_size,
+                        int stride,
+                        VariantConfigs& opt,
+                        VariantConfigs& hyp,
+                        bool augment,
+                        float pad,
+						bool is_val,
+						bool overlap,
+						int downsample_ratio)
+{
+	int gs = stride;
+	bool rect = is_val ? true : std::get<bool>(opt["rect"]);
+	bool quad = std::get<bool>(opt["quad"]);
+	bool single_cls = nc == 1 || std::get<bool>(opt["single_cls"]);	
+	auto datasets = LoadImagesAndLabelsAndMasks(path, 
+							hyp, 
+							imgsz, 
+							augment,
+							rect, 
+							single_cls, 
+							gs, 
+							pad,
+							overlap,
+							downsample_ratio).map(CustomCollateSeg());
+    int num_images = *(datasets.size());
+	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
+	Dataloader_Segment dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+                 std::move(datasets), dataloader_options);
+	return std::make_tuple(std::move(dataloader), num_images);
+}
+

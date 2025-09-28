@@ -60,7 +60,7 @@ class ComputeLoss// : public torch::nn::Module
 public:
     bool sort_obj_iou = false;
 
-    ComputeLoss(Detect m, VariantConfigs& _hyp, bool autobalance = false);
+    ComputeLoss(std::shared_ptr<DetectImpl> m, VariantConfigs& _hyp, bool autobalance = false);
 
     std::tuple<torch::Tensor, torch::Tensor> operator()(const std::vector<torch::Tensor>& p,
         const torch::Tensor& targets);

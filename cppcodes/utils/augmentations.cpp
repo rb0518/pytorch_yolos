@@ -228,10 +228,9 @@ random_perspective(cv::Mat img,
 		else
 		{
 			auto xy = torch::ones({ n * 4, 3 }, torch::kFloat32);
-
 			// 重构数据组织 (x1y1, x2y2, x1y2, x2y1)
 			auto target_coords = targets.index({ torch::indexing::Slice(),
-											  torch::tensor({1, 2, 3, 4, 1, 4, 3, 2}) });	// {x1y1, x2y2, x1y2, x2y1}
+											torch::tensor({1, 2, 3, 4, 1, 4, 3, 2}) });
 			xy.index_put_({ torch::indexing::Slice(), torch::indexing::Slice(0, 2) },
 				target_coords.reshape({ n * 4, 2 }));
 
@@ -240,7 +239,7 @@ random_perspective(cv::Mat img,
 
 			// 是否透视效果
 			if (perspective) {
-				auto xy_div = xy.index({ torch::indexing::Slice(), 2 }).unsqueeze(1);
+				auto xy_div = xy.index({ torch::indexing::Slice(), 2}).unsqueeze(1);
 				xy = xy.index({ torch::indexing::Slice(), torch::indexing::Slice(0, 2) }).div(xy_div);
 			}
 			else {
@@ -249,16 +248,27 @@ random_perspective(cv::Mat img,
 			xy = xy.reshape({ n, 8 });
 			// create new boxes
 			auto x = xy.index({ torch::indexing::Slice(),
-							  torch::tensor({0, 2, 4, 6}) });
+							torch::tensor({0, 2, 4, 6}) });
 			auto y = xy.index({ torch::indexing::Slice(),
-							  torch::tensor({1, 3, 5, 7}) });
+							torch::tensor({1, 3, 5, 7}) });
 
 			auto x_min = std::get<0>(x.min(1));
 			auto y_min = std::get<0>(y.min(1));
 			auto x_max = std::get<0>(x.max(1));
 			auto y_max = std::get<0>(y.max(1));
 
-			newbox = torch::stack({ x_min, y_min, x_max, y_max }, 1);
+			auto new_boxes = torch::stack({ x_min, y_min, x_max, y_max }, 1);
+
+			//裁切
+			newbox.index_put_({ torch::indexing::Slice(),
+								torch::tensor({0, 2}) },
+				new_boxes.index({ torch::indexing::Slice(),
+							torch::tensor({0, 2}) }).clamp(0, width));
+			newbox.index_put_({ torch::indexing::Slice(),
+								torch::tensor({1, 3}) },
+				new_boxes.index({ torch::indexing::Slice(),
+							torch::tensor({1, 3}) }).clamp(0, height));
+
 		}
 
 		

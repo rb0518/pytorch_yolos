@@ -24,12 +24,15 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
     // 初始化工厂映射表（这里仅作为示例）
     if (factories.empty()) {
         factories["Conv"] = []() { return std::make_shared<ConvImpl>(); };
+        factories["BottleneckCS"] = [](){ return std::make_shared<BottleneckCSPImpl>();};
         factories["C3"] = []() { return std::make_shared<C3Impl>(); };
-        factories["SPPF"] = []() { return std::make_shared<SPPFImpl>(); };
         factories["Concat"] = []() { return std::make_shared<ConcatImpl>(); };
+        factories["SPPF"] = []() { return std::make_shared<SPPFImpl>(); };
+        factories["SPP"] = [](){ return std::make_shared<SPPImpl>(); };       
         factories["nn.Upsample"] = []() { return std::make_shared<nnUpsampleImpl>(); };
         factories["Focus"] = [](){ return std::make_shared<FocusImpl>(); };
-        factories["SPP"] = [](){ return std::make_shared<SPPImpl>(); };
+        factories["Contract"] = []() { return std::make_shared<ContractImpl>(); };
+        factories["Expand"] = []() { return std::make_shared<ExpandImpl>(); };
     }
 
     auto it = factories.find(className);
@@ -41,14 +44,15 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
 }
 
 // ===================== Detect module start ===========================
-DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, bool _inplace) 
+DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, bool _inplace, bool is_seg_base) 
 {
     this->nc = _nc;
     this->no = _nc + 5;
     this->nl = _anchors.size();          // float
     this->na = _anchors[0].size() / 2;
     this->inplace = _inplace;
-
+    this->is_segment = is_seg_base;
+    
     for (int i = 0; i < nl; i++)
     {
         this->grid.push_back(torch::zeros({1}));
@@ -62,13 +66,13 @@ DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::v
     }
     anchors_ = torch::tensor(flat_anchors).view({this->nl, -1, 2});
     register_buffer("anchors", anchors_);
-    for(int i = 0; i < _ch.size(); i++)
+
+    if(false == is_seg_base)
     {
-        //torch::nn::Conv2d conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1));
-        m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
-//        register_module("m-"+std::to_string(i), m[i]);
+        for(int i = 0; i < _ch.size(); i++)
+            m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
+        register_module("m", m);
     }
-    register_module("m", m);
 }
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::vector<torch::Tensor> x) 
@@ -125,7 +129,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::v
     {
         z_cat = torch::cat(z, 1);   //将z放到最前面 [bs, 25200, 85]
     }
-    return { z_cat, ret };    // 统一返回格式，如是是predict return [x, z = []]
+    return { z_cat, ret};    // 统一返回格式，如是是predict return [x, z = []]
 }
 
 std::tuple<torch::Tensor, torch::Tensor> DetectImpl::_make_grid(int nx, int ny, int i)
@@ -144,15 +148,10 @@ void DetectImpl::check_anchor_order()
 {
     auto da = flat_anchors[flat_anchors.size()-1] - flat_anchors[0];
     auto ds = stride[stride.size(0)-1].item().toFloat() - stride[0].item().toFloat();
-
-    // for(int i = 0; i < stride.size(0); i++)
-    //     std::cout << i << " " << stride[i].item().toInt() << std::endl;
-
     if ((da * ds) < 0)
     {
         LOG(ERROR) << "Reversing anchor order.";
         named_buffers()["anchors"] = named_buffers()["anchors"].flip(0);
-        //named_buffers()["anchor_grid"] = named_buffers()["anchor_grid"].flip(0);
     }
 }
 
@@ -182,8 +181,85 @@ void DetectImpl::_initialize_biases(std::vector<int> cf)
         mi->bias.set_requires_grad(true);
     }
 }
-
 // ===================== Detect module over ===========================
+
+// =====================  Segment Moduel ===========================
+SegmentImpl::SegmentImpl(int _nc, std::vector<std::vector<float>> _anchors, 
+                    int _nm, int _npr, std::vector<int> _ch, bool _inplace) 
+                    : DetectImpl(_nc, _anchors, _ch, _inplace, true)
+{
+    this->nm = _nm;
+    this->npr = _npr;
+    this->no = _nc + 5 + nm;    // number of outputs per anchor
+    for(int i = 0; i < _ch.size(); i++)
+    {
+        m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
+    }
+    register_module("m", m);
+    proto = Proto(_ch[0], npr, nm);
+    register_module("proto", proto);
+}
+
+std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl::forward(std::vector<torch::Tensor> x) 
+{
+    std::vector<torch::Tensor> ret(this->m->size()); // 用ModuleList，解决了named索引的一致，但后续操作不方便
+    std::vector<torch::Tensor> z(this->m->size());
+    torch::Tensor z_cat = torch::zeros({ 0 });
+
+    torch::Tensor p_proto = proto->forward(x[0]);
+
+    for (int i = 0; i < this->nl; i++)
+    {
+        auto mi = m[i]->as<torch::nn::Conv2d>();
+        ret[i] = mi->forward(x[i]);
+        auto bs = ret[i].size(0);     // batch_size
+        auto ny = ret[i].size(2);     // h
+        auto nx = ret[i].size(3);     // w
+    
+        anchors_ = anchors_.to(x[i].device());
+
+        // # x(bs,255,20,20) to x(bs,3,20,20,85)
+        ret[i] = ret[i].view({bs, this->na, this->no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
+
+        if (!is_training()) 
+        {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
+            bool bneed_make_grid = true;
+            if(bneed_make_grid)
+            {
+                std::tie(this->grid[i], this->anchor_grid[i]) = _make_grid(nx, ny, i);
+            }    
+            
+            this->grid[i] = this->grid[i].to(x[i].device());
+            this->stride = this->stride.to(x[i].device());
+            this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
+            auto y = ret[i].sigmoid();
+            if(inplace)
+            {
+                y.index_put_({"...", torch::indexing::Slice(0, 2) },
+                    (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.0f - 0.5f + this->grid[i]) * this->stride[i]
+                    );
+
+                y.index_put_({"...", torch::indexing::Slice(2, 4)},
+                    torch::pow((y.index({"...", torch::indexing::Slice(2, 4) }) * 2.0f), 2) * this->anchor_grid[i]
+                    );
+            }
+            else
+            {
+                auto xy = (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.f - 0.5f + this->grid[i]) * this->stride[i];
+                auto wh = torch::pow(y.index({"...", torch::indexing::Slice(2, 4)}) * 2 ,2) * this->anchor_grid[i];
+                y = torch::cat({xy, wh, y.index({"...", torch::indexing::Slice(4, torch::indexing::None)})}, -1);
+            }
+            z[i] = y.view({bs, -1, no});
+        }
+    }
+
+    if(!is_training())
+    {
+        z_cat = torch::cat(z, 1);   //将z放到最前面 [bs, 25200, 85]
+    }
+    return { z_cat, ret, p_proto};    // 统一返回格式，如是是predict return [x, z = []]
+}
+// ===================== Segment module over ===========================
 ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo)
 {
     n_classes = classes;
@@ -197,34 +273,34 @@ ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, 
 
     readconfigs(yaml_file);
     create_modules();
-    //std::cout << "create modules over..." << std::endl;
-    // init stride and check
+
     this->train();
     torch::Tensor img_tmp = torch::zeros({ 1, channels, imageheight, imagewidth });
     img_tmp = img_tmp.to(this->named_parameters().begin()->value().device());
     torch::Tensor pred;
     std::vector<torch::Tensor> train_ret(3);
-    std::tie(pred, train_ret) = forward(img_tmp);
+    torch::Tensor pred_seg;
+    std::tie(pred, train_ret, pred_seg) = forward(img_tmp);
     std::vector<int> strides;
     for(int i = 0; i < train_ret.size(); i++) {       // [bs, na, h, w, no]
         strides.emplace_back(image_height / train_ret[i].size(2));
     }
-    module_detect->stride = torch::tensor(strides);
-    module_detect->check_anchor_order();
+
+    last_module->stride = torch::tensor(strides);
+    last_module->check_anchor_order();
     //std::cout << "before div: " << module_detect->anchors_ << std::endl;
 
-    module_detect->anchors_ = module_detect->anchors_.div(module_detect->stride.view({ -1, 1, 1 }));
+    last_module->anchors_ = last_module->anchors_.div(last_module->stride.view({ -1, 1, 1 }));
 
     //std::cout << "after div: " << module_detect->anchors_ << std::endl;
 
-    stride = module_detect->stride;
-    module_detect->_initialize_biases();
+    stride = last_module->stride;
+    last_module->_initialize_biases(); 
 
-    // initialize_weight    initialize_weights(this);
     initialize_weights();
 }
 
-std::tuple<torch::Tensor, std::vector<torch::Tensor>> ModelImpl::forward(torch::Tensor x)
+std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::forward(torch::Tensor x)
 {
     if(b_showdebug)
         std::cout << "Start forward() total layers: " << module_layers.size()  << std::endl;
@@ -232,6 +308,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> ModelImpl::forward(torch::
     std::vector<torch::Tensor> layer_outputs;
     std::vector<torch::Tensor> detect_outs;
     torch::Tensor detect_pred;
+    torch::Tensor segment_pred;
 
     for(int i = 0; i < module_layers.size(); i++)
     {
@@ -267,10 +344,19 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> ModelImpl::forward(torch::
     {
         tmp.push_back(layer_outputs[item]);
     }
-    
-    std::tie(detect_pred, detect_outs) = module_detect->forward(tmp);
 
-    return { detect_pred, detect_outs };
+    if(is_segment == false)
+    {
+        std::tie(detect_pred, detect_outs) = last_module->forward(tmp);
+        segment_pred = torch::empty({0});
+    }
+    else
+    {
+        std::shared_ptr<SegmentImpl> last_s = std::dynamic_pointer_cast<SegmentImpl>(last_module);
+        std::tie(detect_pred, detect_outs, segment_pred) = last_s->forward(tmp);
+    }
+
+    return { detect_pred, detect_outs, segment_pred};
 }
 
 void ModelImpl::readconfigs(const std::string& yaml_file)
@@ -378,14 +464,6 @@ void ModelImpl::create_modules()
                     layer_cfgs[i].args
                     );
 
-        // register_module()函数中string如果带特殊字符，会报错            
-        // 测试register_module
-        /*        
-        if(layer_cfgs[i].name == "nn.Upsample") // 先简单处理，后续进行判定是否带'.'
-            register_module("nnUpsample" + std::to_string(i), module_layers[i]);
-        else
-            register_module(layer_cfgs[i].name + std::to_string(i), module_layers[i]);
-        */
         register_module("model-"+std::to_string(i), module_layers[i]);
         int total_out_ch = module_layers[i]->get_outchannels();
         if(layer_cfgs[i].name == "Concat")       // 合并要将多个前面out_channel加起来算
@@ -408,15 +486,24 @@ void ModelImpl::create_modules()
     // 构造 最后一层的 Detect/Segment
     YoloLayerDef final_layercfgs = layer_cfgs[layer_cfgs.size()-1];
     layer_froms.push_back(final_layercfgs.froms);
-//    if(final_layercfgs.name == "Detect") 
+
+    std::vector<int> inchannels;
+    for(auto item : final_layercfgs.froms)
+        inchannels.push_back(layer_out_chs[item]);
+
+    if(final_layercfgs.name == "Detect") 
     {
-        std::vector<int> inchannels;
-        for(auto item : final_layercfgs.froms)
-            inchannels.push_back(layer_out_chs[item]);
-        module_detect = Detect(n_classes, anchors, inchannels, false);
-//        register_module("detect", module_detect);
-        register_module("model-" + std::to_string(layer_cfgs.size()-1), module_detect);
+        last_module = std::make_shared<DetectImpl>(n_classes, anchors, inchannels, false);
     }
+    else{
+        is_segment = true;
+        std::cout << "Create segment layer: " << std::endl;
+        int nm = std::get<int>(final_layercfgs.args[2]);
+        int npr = std::get<int>(final_layercfgs.args[3]);
+
+        last_module = std::make_shared<SegmentImpl>(n_classes, anchors, nm, npr, inchannels, false);
+    }
+    register_module("model-" + std::to_string(layer_cfgs.size()-1), last_module);    
 }
 
 void ModelImpl::initialize_weights()
@@ -450,7 +537,7 @@ void ModelImpl::initialize_weights()
 
 void ModelImpl::show_modelinfo()
 {
-    std::cout << "\033[33m" << "Model: " << "\033[37m" << this->cfgfile << std::endl;
+    std::cout << ColorString("Model: ", "Info") << this->cfgfile << std::endl;
     std::cout << "nc: " << n_classes << " ch: " << n_channels << " height: " << image_height << " widht: " << image_width << std::endl;
     int i = 0;
     std::for_each(layer_cfgs.begin(),layer_cfgs.end(),[&](YoloLayerDef layer){

@@ -124,3 +124,4 @@ void plot_images_pred(torch::Tensor images, std::vector<torch::Tensor> preds,
     int max_subplots = 16);
 
 void plot_pred(cv::Mat& img, torch::Tensor pred, std::vector<std::string> names, int line_thickness = 3);
+void plot_labels(cv::Mat& img, torch::Tensor targets, int img_idx, int line_thickness=3);

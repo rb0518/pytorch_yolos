@@ -113,10 +113,8 @@ struct CustomCollateSeg : torch::data::transforms::Collation<CustomExampleSeg > 
 class LoadImagesAndLabels : public torch::data::Dataset<LoadImagesAndLabels, CustomExample>
 {
 public:
-	explicit LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
-		int _img_size = 640, int _batch_size = 16, bool _augment = false,
-		bool _rect = false, bool _image_weights = false, bool _cache_images = false,
-		bool _single_cls = false, int _stride = 32, float _pad = 0.0f, std::string _prefix = "");
+	LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
+		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad);
 
 	CustomExample get(size_t index);
 	torch::optional<size_t> size() const override {
@@ -127,15 +125,11 @@ public:
 	std::string		path;
 	VariantConfigs	hyp;
 	int				img_size = 640;
-	int				batch_size = 16;
 	bool			augment = false;
 	bool			rect = false; 
-	bool			image_weights = false;
-	bool			catch_images = false;
 	bool			single_cls = false;
 	int				stride = 32; 
 	float			pad = 0.0f; 
-	std::string		prefix = "";
 
 	bool			mosaic;
 	std::vector<int> mosaic_border;
@@ -155,9 +149,8 @@ class LoadImagesAndLabelsAndMasks : public torch::data::Dataset<LoadImagesAndLab
 {
 public:	
 	explicit LoadImagesAndLabelsAndMasks(std::string _path, VariantConfigs _hyp,
-		int _img_size = 640, int _batch_size = 16, bool _augment = false,
-		bool _rect = false, bool _image_weights = false, bool _cache_images = false,
-		bool _single_cls = false, int _stride = 32, float _pad = 0.0f, std::string _prefix = "");
+		int _img_size = 640, bool _augment = false,	bool _rect = false,	bool _single_cls = false, 
+		int _stride = 32, float _pad = 0.0f, bool _overlap = false, int _downsample_ratio = 4);
 
 	CustomExampleSeg get(size_t index);
 	torch::optional<size_t> size() const override {
@@ -167,15 +160,11 @@ public:
 	std::string		path;
 	VariantConfigs	hyp;
 	int				img_size = 640;
-	int				batch_size = 16;
 	bool			augment = false;
 	bool			rect = false; 
-	bool			image_weights = false;
-	bool			catch_images = false;
 	bool			single_cls = false;
 	int				stride = 32; 
 	float			pad = 0.0f; 
-	std::string		prefix = "";
 
 	bool			mosaic;
 	std::vector<int> mosaic_border;
@@ -188,6 +177,36 @@ public:
 	std::vector<int> indices;	
 
 	bool overlap = false;
-	int downsample_ratio = 4;
+	int downsample_ratio = 1;
 	std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>> load_mosaic(int index);
 };
+
+using Dataloader_Detect = std::unique_ptr<torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabels, CustomCollate>, torch::data::samplers::SequentialSampler>>;
+using Dataloader_Segment = std::unique_ptr<torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabelsAndMasks, CustomCollateSeg>, torch::data::samplers::SequentialSampler>>;
+
+std::tuple<Dataloader_Detect, int> create_dataloader(
+						const std::string& path,
+                        int imgsz,
+						int nc,
+                        int batch_size,
+                        int stride,
+                        VariantConfigs& opt,
+                        VariantConfigs& hyp,
+                        bool augment = false,
+                        float pad = 0.0f,
+						bool is_val = false);
+
+
+std::tuple<Dataloader_Segment, int> create_dataloader_segment(
+						const std::string& path,
+                        int imgsz,
+						int nc,
+                        int batch_size,
+                        int stride,
+                        VariantConfigs& opt,
+                        VariantConfigs& hyp,
+                        bool augment = false,
+                        float pad = 0.0f,
+						bool is_val = false,
+						bool overlap = false,
+						int downsample_ratio = 1);
