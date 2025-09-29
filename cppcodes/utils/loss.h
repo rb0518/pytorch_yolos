@@ -60,31 +60,39 @@ class ComputeLoss// : public torch::nn::Module
 public:
     bool sort_obj_iou = false;
 
-    ComputeLoss(std::shared_ptr<DetectImpl> m, VariantConfigs& _hyp, bool autobalance = false);
+    ComputeLoss(std::shared_ptr<DetectImpl> m, VariantConfigs& _hyp, bool _autobalance = false, bool _overlap = false);
 
-    std::tuple<torch::Tensor, torch::Tensor> operator()(const std::vector<torch::Tensor>& p,
-        const torch::Tensor& targets);
+    std::tuple<torch::Tensor, torch::Tensor> operator()(const std::vector<torch::Tensor>& p, const torch::Tensor& proto,
+        torch::Tensor& targets, torch::Tensor& masks);
 
 private:
     torch::nn::BCEWithLogitsLoss BCEcls{nullptr}, BCEobj{nullptr};
     ///FocalLoss FocalLoss_cls{nullptr}, FocalLoss_obj{nullptr};
     double cp, cn, gr;
-
     std::vector<double> balance;
-    int ssi, na, nc, nl;
+    int ssi;
+    int na;     // number of anchors
+    int nc;     // number of classes
+    int nl;     // number of layers
     //torch::Tensor anchors;
     torch::Device _device = torch::Device(torch::kCPU);
     bool autobalance;
     torch::Tensor strides;
 
+    bool overlap = false;
+    bool is_segment;
+    int nm;     // number of masks
+
     std::tuple<std::vector<torch::Tensor>,
         std::vector<torch::Tensor>,
         std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>,
+        std::vector<torch::Tensor>,
+        std::vector<torch::Tensor>,
         std::vector<torch::Tensor>>
         build_targets(const std::vector<torch::Tensor>& p, 
             const torch::Tensor& _targets); 
 
-    Detect m_ptr{nullptr};
+    std::shared_ptr<DetectImpl> m_ptr;
     VariantConfigs hyp;
 };
 

@@ -13,7 +13,7 @@
 class DetectImpl : public torch::nn::Module {
 public:
     DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, bool _inplace=true,
-            bool is_seg_base = false    // segment class no need add nm
+            bool _is_segment = false    // segment class no need add nm
             );
     std::tuple<torch::Tensor, std::vector<torch::Tensor>> forward(std::vector<torch::Tensor> x);
 
@@ -26,7 +26,7 @@ public:
     int image_width = 640;
     int image_height = 640;
     bool is_segment = false;
-    
+
     torch::Tensor stride;
     std::vector<torch::Tensor> grid;
     std::vector<torch::Tensor> anchor_grid;

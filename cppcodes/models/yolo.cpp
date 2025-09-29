@@ -44,15 +44,16 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
 }
 
 // ===================== Detect module start ===========================
-DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, bool _inplace, bool is_seg_base) 
+DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, 
+                    bool _inplace, bool _is_segment) 
 {
     this->nc = _nc;
     this->no = _nc + 5;
     this->nl = _anchors.size();          // float
     this->na = _anchors[0].size() / 2;
     this->inplace = _inplace;
-    this->is_segment = is_seg_base;
-    
+    this->is_segment = _is_segment;
+
     for (int i = 0; i < nl; i++)
     {
         this->grid.push_back(torch::zeros({1}));
@@ -67,7 +68,7 @@ DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::v
     anchors_ = torch::tensor(flat_anchors).view({this->nl, -1, 2});
     register_buffer("anchors", anchors_);
 
-    if(false == is_seg_base)
+    if(false == is_segment)
     {
         for(int i = 0; i < _ch.size(); i++)
             m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
@@ -104,24 +105,11 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::v
             this->grid[i] = this->grid[i].to(x[i].device());
             this->stride = this->stride.to(x[i].device());
             this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
-            auto y = ret[i].sigmoid();
-            if(inplace)
-            {
-                y.index_put_({"...", torch::indexing::Slice(0, 2) },
-                    (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.0f - 0.5f + this->grid[i]) * this->stride[i]
-                    );
-
-                y.index_put_({"...", torch::indexing::Slice(2, 4)},
-                    torch::pow((y.index({"...", torch::indexing::Slice(2, 4) }) * 2.0f), 2) * this->anchor_grid[i]
-                    );
-            }
-            else
-            {
-                auto xy = (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.f - 0.5f + this->grid[i]) * this->stride[i];
-                auto wh = torch::pow(y.index({"...", torch::indexing::Slice(2, 4)}) * 2 ,2) * this->anchor_grid[i];
-                y = torch::cat({xy, wh, y.index({"...", torch::indexing::Slice(4, torch::indexing::None)})}, -1);
-            }
-            z[i] = y.view({bs, -1, no});
+            auto splits = ret[i].sigmoid().split({2, 2, nc + 1}, 4);
+            auto xy = (splits[0] * 2 + grid[i]) * stride[i];
+            auto wh = (splits[1] * 2).pow(2) * anchor_grid[i];
+            auto y = torch::cat({xy, wh, splits[2]}, 4);   
+            z[i] = y.view({bs, na* nx * ny, no}).clone();
         }
     }
 
@@ -138,7 +126,7 @@ std::tuple<torch::Tensor, torch::Tensor> DetectImpl::_make_grid(int nx, int ny, 
     auto yvxv = torch::meshgrid({ torch::arange(ny).to(d), torch::arange(nx).to(d)}, "ij");
     auto yv = yvxv[0];
     auto xv = yvxv[1];
-    auto ret = torch::stack({ xv, yv}, 2).expand({1, na, ny, nx, 2}).to(torch::kFloat);
+    auto ret = torch::stack({ xv, yv}, 2).expand({1, na, ny, nx, 2}).to(torch::kFloat) - 0.5f;
     auto an_grid = (anchors_[i].clone() * this->stride[i]).view({ 1, this->na, 1, 1, 2 })
             .expand({ 1, this->na, ny, nx, 2 }).to(torch::kFloat);
     return { ret, an_grid };
@@ -232,24 +220,11 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl
             this->grid[i] = this->grid[i].to(x[i].device());
             this->stride = this->stride.to(x[i].device());
             this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
-            auto y = ret[i].sigmoid();
-            if(inplace)
-            {
-                y.index_put_({"...", torch::indexing::Slice(0, 2) },
-                    (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.0f - 0.5f + this->grid[i]) * this->stride[i]
-                    );
-
-                y.index_put_({"...", torch::indexing::Slice(2, 4)},
-                    torch::pow((y.index({"...", torch::indexing::Slice(2, 4) }) * 2.0f), 2) * this->anchor_grid[i]
-                    );
-            }
-            else
-            {
-                auto xy = (y.index({"...", torch::indexing::Slice(0, 2)}) * 2.f - 0.5f + this->grid[i]) * this->stride[i];
-                auto wh = torch::pow(y.index({"...", torch::indexing::Slice(2, 4)}) * 2 ,2) * this->anchor_grid[i];
-                y = torch::cat({xy, wh, y.index({"...", torch::indexing::Slice(4, torch::indexing::None)})}, -1);
-            }
-            z[i] = y.view({bs, -1, no});
+            auto splits = ret[i].split_with_sizes({2, 2, nc + 1, no - nc - 5}, 4);
+            auto xy = (splits[0].sigmoid() * 2 + grid[i]) * stride[i];
+            auto wh = (splits[1].sigmoid() * 2).pow(2) * anchor_grid[i];
+            auto y = torch::cat({xy, wh, splits[2].sigmoid(), splits[3]}, 4);   
+            z[i] = y.view({bs, na* nx * ny, no}).clone();
         }
     }
 

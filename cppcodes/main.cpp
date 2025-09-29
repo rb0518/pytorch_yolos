@@ -77,7 +77,7 @@ int main(int argc, char* argv[])
     FLAGS_alsologtostderr = true;
 
     std::string root_path = get_root_path_string();
-
+FLAGS_runtype = "train_seg";
     if(FLAGS_runtype=="train")
     {
         VariantConfigs opt = set_cfg_opt_default();
@@ -170,6 +170,103 @@ int main(int argc, char* argv[])
 
         train(root_path, hyp, opt, device, FLAGS_jit_weights);
     }
+    // start segment test, 后续代码删除，与train合并 
+    if(FLAGS_runtype=="train_seg")
+    {
+FLAGS_cfg = "models/segment/yolov5s-seg.yaml";
+FLAGS_data = "data/coco128-seg.yaml";       
+        VariantConfigs opt = set_cfg_opt_default();
+        std::string ckpt = "";
+        if (FLAGS_resume != "")  // 将从指定的目录中恢复训练
+        {
+            // if FLAGS_resume 设置的文件不存在，在默认的目录中去找最新的pt文件
+            if(std::filesystem::exists(std::filesystem::path(root_path).append(FLAGS_resume)))
+            {
+                ckpt = std::filesystem::path(root_path).append(FLAGS_resume).string();
+            }
+            else{
+                std::string search_path = std::filesystem::path(root_path).append(std::get<std::string>(opt["project"])).string();
+                auto tmp_opt =  get_last_run(search_path);
+                if(tmp_opt != "")
+                    ckpt = tmp_opt;
+            }
+            
+            if(ckpt == ""){
+                LOG(ERROR) << "not set right, check resume settings";
+                exit(-1);
+            }
+            
+            auto opt_yaml = std::filesystem::path(ckpt).parent_path().parent_path().append("opt.yaml").string();
+            std::cout << "Use last opt: " << opt_yaml << " " << std::filesystem::path(ckpt).parent_path().parent_path().string() << std::endl;
+            opt = load_cfg_yaml(opt_yaml);
+            //opt.cfg, opt.weights, opt.resume, opt.batch_size, opt.global_rank, opt.local_rank 
+            //      = '', ckpt, True, opt.total_batch_size, * apriori  # reinstate
+            //opt["cfg"] = ""; //依然采取从cfg中读取网络结构，再调入weights的方法，这里就不要去原目录中的cfg设置了
+            // 除以下参数外，其它参数全部沿用resume目录中的配置
+            opt["weights"] = std::filesystem::relative(std::filesystem::path(ckpt), std::filesystem::path(root_path)).string();
+            opt["resume"] = true;           // 将resume 设置为true
+            auto hypfilename = std::filesystem::path(ckpt).parent_path().parent_path().append("hyp.yaml");
+            opt["hyp"] = std::filesystem::relative(hypfilename, std::filesystem::path(root_path)).string();
+            if (std::get<std::string>(opt["data"]) != FLAGS_data)
+                opt["data"] = FLAGS_data;
+        }
+        else
+        {
+            // load opt from cfgs/opt.yaml
+            load_default_environment(root_path, opt);
+
+            opt["weights"] = FLAGS_weights;
+            opt["cfg"] = FLAGS_cfg;
+            opt["data"] = FLAGS_data;
+            opt["hyp"] = FLAGS_hyp;
+            opt["batch_size"] = FLAGS_batch_size;
+            opt["img_size"] = std::vector<int>({ FLAGS_img_size, FLAGS_img_size });
+            opt["rect"] = FLAGS_rect;
+            opt["nosave"] = FLAGS_nosave;
+            opt["notest"] = FLAGS_notest;
+            opt["noautoanchor"] = FLAGS_noautoanchor;
+            opt["evolve"] = FLAGS_evolve;
+            opt["device"] = FLAGS_device;
+            opt["adam"] = FLAGS_adam;
+            opt["workers"] = FLAGS_workers;
+            opt["project"] = FLAGS_project;
+            opt["name"] = FLAGS_name;
+            opt["exist_ok"] = FLAGS_exist_ok;
+            opt["quad"] = FLAGS_quad;
+            opt["linear_lr"] = FLAGS_linear_lr;
+            opt["label_smoothing"] = float(FLAGS_label_smoothing);
+            opt["save_period"] = FLAGS_save_period;
+            opt["total_batch_size"] = FLAGS_batch_size;
+        }
+opt["project"] = "runs/train_seg";
+
+        opt["epochs"] = FLAGS_epochs;
+        std::string prj_and_name = std::get<std::string>(opt["project"]) + "/" + std::get<std::string>(opt["name"]);
+        auto search_path = std::filesystem::path(root_path).append(prj_and_name).string();
+        opt["exist_ok"] = FLAGS_exist_ok;
+        prj_and_name = increment_path(search_path, std::get<bool>(opt["exist_ok"]));
+        prj_and_name = std::filesystem::relative(std::filesystem::path(prj_and_name), std::filesystem::path(root_path)).string();
+        opt["save_dir"] = prj_and_name;
+
+
+        torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0)
+            : torch::Device(torch::kCPU); //select_device(opt["device"], opt["batch_size"]);
+
+        // Hyperparameters
+        VariantConfigs hyp;
+        if (std::get<std::string>(opt["hyp"]) == "")
+        {
+            hyp = set_cfg_hyp_default();
+        }
+        else
+        {
+            std::string hyp_file = std::filesystem::path(root_path).append(std::get<std::string>(opt["hyp"])).string();
+            hyp = load_cfg_yaml(hyp_file);
+        }
+
+        train_seg(root_path, hyp, opt, device, FLAGS_jit_weights);
+    }
+    // end for test train_seg
     else if(FLAGS_runtype=="predict" || FLAGS_runtype == "jit")
     {
         float confidence_threshold = 0.4f;

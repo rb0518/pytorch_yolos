@@ -323,7 +323,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     for (const auto& param : jit_model.named_parameters())
     {
         jit_params[param.name] = param.value;
-        //std::cout << "jit_model:  " << param.name << std::endl;
+        std::cout << "jit_model:  " << param.name << std::endl;
     }
     auto jit_params_count = jit_params.size();
     int n_params = 0;
@@ -334,7 +334,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         torch::AutoGradMode enable_grad(false);
         //torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
         std::string str_name = param.key();
-        //std::cout << "model named_parameters: " << str_name << std::endl;
+        std::cout << "model named_parameters: " << str_name << std::endl;
         //  "model-1.m-1.bn1.bias" ==> "model.1.m.1.bn1.bias
         str_name = std::regex_replace(str_name, std::regex("-"), ".");
         
