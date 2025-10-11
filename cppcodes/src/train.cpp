@@ -18,6 +18,8 @@
 #include "yaml_load.h"
 #include "torch_utils.h"
 
+#include "augmentations.h"
+
 #include "test.h"
 #ifdef WIN32
 //void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../data/images/zidane.jpg");       // Working Directory = ${ProjectDir}
@@ -314,6 +316,36 @@ void train(const std::string& _root,
             if(idx == 0 && epoch < (start_epoch + 3))
             {
                 Singleton_PlotBatchImages::getInstance(save_dir, "batch_train")->push_data(imgs, targets);
+                /*                
+                if(is_segment)
+                {
+                    int overlap_flag = int(shapes[0][7]);
+                    if(overlap_flag < 1)
+                    {
+                        //std::cout << "segment not overlap: " << overlap_flag << std::endl;
+                        for(int bs = 0; bs < imgs.size(0); bs++)
+                        {
+                            auto img_src = imgs[bs].clone();
+                            // std::cout << "img_src: " << img_src.sizes() << std::endl;
+                            auto mat_src = convert_tensor_to_mat(img_src, img_src.size(2), img_src.size(1), img_src.size(0), true);
+                            //cv::imshow("src"+std::to_string(bs), mat_src);
+                            for(int t_idx = 0; t_idx < targets.size(0); t_idx++)
+                            {
+                                if(targets[t_idx][0].item().toInt() == bs)
+                                {
+                                    auto img_msk = masks[t_idx].clone() * 250;
+                                    img_msk = img_msk.unsqueeze(0);
+                                    auto mat_mask = convert_tensor_to_mat(img_msk, img_msk.size(2), img_msk.size(1), 1, true);
+                                    cv::resize(mat_mask, mat_mask, mat_src.size());
+//                                    cv::imwrite("msk_"+std::to_string(bs)+std::to_string(t_idx)+".jpg", mat_mask);
+                                    cv::subtract(mat_src, mat_mask, mat_src);
+                                }
+                            }
+                            cv::imwrite("src_"+std::to_string(epoch)+"_"+std::to_string(bs)+".jpg", mat_src);
+                        }
+                    }
+                }
+                */
             }
 
             imgs = imgs.to(torch::kFloat) / 255.f;
@@ -459,7 +491,6 @@ void train(const std::string& _root,
     } // end epochs
 
     save_checkpoint(last, model, optimizer, epochs-1);
-    torch::save(ptr_model.get()->ptr(), best);
 
     if (true == std::get<bool>(opt["notest"]))
     {  //
@@ -479,6 +510,8 @@ void train(const std::string& _root,
     }
     else
         test_model(ptr_model);  // 测试代码
+
+    save_checkpoint(best, model, optimizer, epochs-1);        
 }
 
 void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= "../../data/images/bus.jpg"*/)
@@ -502,7 +535,12 @@ void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= ".
     bool is_segment = model->is_segment;
     torch::Device device = model->parameters().begin()->device();
     cv::Mat src_image = cv::imread(strfilename);
-    cv::resize(src_image, src_image, cv::Size(640, 640));
+
+    std::vector<float> ratio, pad;
+    int img_size = 640;
+    std::tie(src_image, ratio, pad)= letterbox(src_image, std::make_pair(img_size, img_size),
+			cv::Scalar(114, 114, 114), false, false, false, 32);
+
     cv::Mat input_image;
     cv::cvtColor(src_image, input_image, cv::COLOR_BGR2RGB);
     
@@ -568,7 +606,7 @@ void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= ".
                     cv::imshow("seg_"+std::to_string(j), mat_mask);
 
                     auto [c_r, c_g, c_b] = SingletonColors::getInstance()->get_color_uchars(cls_id);
-                    float f_mask_thr = 0.5 + std::max(0.0f, (0.5f - score))/10.f; // 二值化
+                    float f_mask_thr = 0.5 /*+ std::max(0.0f, (0.5f - score))/10.f*/; // 二值化
                     mask_b = mask_b.gt_(f_mask_thr);    
                     mask_b = mask_b.to(torch::kByte);
                     int c = mask_b.size(0);
@@ -585,7 +623,7 @@ void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename /*= ".
 
                     for (int k_pixel = 0; k_pixel < mask_b.numel(); k_pixel++) 
                     {
-                        float f_front = float(*mask_b_ptr) * 0.3f;
+                        float f_front = float(*mask_b_ptr) * 0.4f;
                         float f_back = 1.f - f_front;
 
                         float s_r = float(*over_r);

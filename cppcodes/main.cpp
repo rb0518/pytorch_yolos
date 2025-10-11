@@ -69,7 +69,7 @@ DEFINE_string(artifact_alias,                   "latest", "version of dataset ar
 
 
 DEFINE_bool(is_segment, false, "predict or jit runtype");
-
+// 约定script.pt是train export， torchscript.pt是eval导出
 DEFINE_string(jit_weights,  "", "path to pytorch pt file");             // load pytorch pretrained weights, must be script export
 
 int main(int argc, char* argv[])
@@ -181,7 +181,7 @@ FLAGS_project ="runs/train_seg";
         float iou_threshold = 0.45f;
 
         if (FLAGS_jit_weights == "")
-        {
+        {   
             FLAGS_jit_weights = "weights/yolov5s.script.pt";
             if(FLAGS_is_segment)
                 FLAGS_jit_weights = "weights/yolov5s-seg.torchscript.pt";
@@ -221,8 +221,10 @@ FLAGS_project ="runs/train_seg";
         jit_model.eval();
 
         auto model = Model(model_filename, 80, FLAGS_img_size, FLAGS_img_size, 3, false);
+        model->eval(); 
         if(FLAGS_runtype == "predict")
         {
+#if 1            
             torch::serialize::InputArchive ckpt;
             ckpt.load_from(weights_filename);
 
@@ -231,23 +233,32 @@ FLAGS_project ="runs/train_seg";
             {
                 model->load(model_in);
             }
+#else
+            model->eval();  // 要用best.pt
+            torch::load(model, weights_filename);
+#endif
         }
+        
+        auto test_tensor = torch::ones({1, 3, FLAGS_img_size, FLAGS_img_size});
+        test_tensor = test_tensor.to(device);
+        model->forward(test_tensor);
+
         model->eval();
-        jit_model.to(device);
         model->to(device);
+        jit_model.to(device);
+
         // 测试代码，经fuse_conv_and_bn，model与jit 推理模型调入一致，126个参数全一一对应了
-
-        for (auto& sub_module : model->modules(false))
-        {
-            if (sub_module->name() == "ConvImpl")
-            {
-                std::cout << sub_module->name() << std::endl;
-                sub_module->as<Conv>()->fuse_conv_and_bn(true);
-            }
-        }
-
-        if(1)
+        if(0)
         {    
+            for (auto& sub_module : model->modules(false))
+            {
+                if (sub_module->name() == "ConvImpl")
+                {
+                    std::cout << sub_module->name() << std::endl;
+                    sub_module->as<Conv>()->fuse_conv_and_bn(true);
+                }
+            }            
+
             std::unordered_map<std::string, torch::Tensor> jit_params;
             for (const auto& param : jit_model.named_parameters())
             {
@@ -290,9 +301,7 @@ FLAGS_project ="runs/train_seg";
             std::cout <<"Load jit parameters total: " << jit_params_count << " Model parameters total: " << n_params << " trans_count: " << count_changes << " paramters." << std::endl;
         }
 
-        auto test_tensor = torch::ones({1, 3, FLAGS_img_size, FLAGS_img_size});
-        test_tensor = test_tensor.to(device);
-        model->forward(test_tensor);
+
 
         std::vector<std::string> names={"person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
                                         "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",

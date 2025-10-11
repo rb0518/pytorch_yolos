@@ -247,6 +247,23 @@ cv::Mat polygon2mask(cv::Size img_size, torch::Tensor& segment, int color = 1, i
 	return mask;
 }
 
+/*
+	2025-10-11 发现不论是tensor.fliplr()还是torch::flip(tensor, {2})，都未实现mask图像的翻转
+	统一为返回cv::Mat数据，统一翻转后再进行图像统一处理
+*/
+#ifndef USE_TORCH_FLIP
+std::vector<cv::Mat> polygons2masks(cv::Size img_size, std::vector<torch::Tensor> segments, int color, int downsample_ratio = 1)
+{
+	std::vector<cv::Mat> masks;
+	for(int i = 0; i < segments.size(); i++)
+	{
+		auto s = segments[i];
+		cv::Mat tmp_mat = polygon2mask(img_size, s, color, downsample_ratio);
+		masks.push_back(tmp_mat);
+	}
+	return masks;
+}
+#else
 torch::Tensor polygons2masks(cv::Size img_size, std::vector<torch::Tensor> segments, int color, int downsample_ratio = 1)
 {
 	std::vector<torch::Tensor> masks;
@@ -270,11 +287,60 @@ torch::Tensor polygons2masks(cv::Size img_size, std::vector<torch::Tensor> segme
 	}
 	return ret;
 }
+#endif
 /*
 	overlap方式，将所有的标签画在一张图上，根据尺寸大小排序，并给出权值(从1开始)
 	返回mask tensor, 为了与非overlap保持一致，返回[1, img_size, img_size]
 	同时返回labels对应面积的排序
+	2025-10-11测试发现torch::flip对mask图像不能进行翻转，所以修改为返回cv::Mat
 */
+#ifndef USE_TORCH_FLIP
+std::tuple<cv::Mat, torch::Tensor> polygons2masks_overlap(cv::Size img_size, std::vector<torch::Tensor> segments, int downsample_ratio = 1)
+{
+	// 发现按原代码转换，最大面积的object没有mask，暂时找不到原因
+	std::vector<int64_t> areas;
+	std::vector<std::vector<cv::Point>> polygons;
+	for (int i = 0; i < segments.size(); i++)
+	{
+		auto s = segments[i];
+		std::vector<cv::Point> polygon;
+		auto x = s.select(1, 0);
+		auto y = s.select(1, 1);
+
+		for (int i = 0; i < s.size(0); i++)
+		{
+			polygon.push_back(cv::Point(int(x[i].item().toFloat()), int(y[i].item().toFloat())));
+		}
+		polygons.push_back(polygon);
+		areas.push_back(cv::contourArea(polygon));
+	}
+	// 按面积大小排序
+	auto sort_tensor_1d = [](const torch::Tensor& input, bool descend = false) {
+		AT_ASSERT(input.dim() == 1, "input Tensor dim not equil 1");
+		auto ascending_indices = torch::argsort(input);
+		if (descend)
+			return torch::flip(ascending_indices, 0);
+		return ascending_indices;
+		};
+
+	auto descend_indices = sort_tensor_1d(torch::tensor(areas, torch::TensorOptions().dtype(torch::kLong)));
+	
+	int ratio = std::max(1, downsample_ratio);
+	std::cout << segments.size() << " areas " << areas.size() << " segments: " << segments.size() << std::endl;
+	// 根据面积排序将图像填充到masks中
+	cv::Mat cv_mask = cv::Mat::zeros(img_size, CV_8UC1); 
+	for (int i = 0; i < descend_indices.size(0); i++)
+	{
+		if(i > 254) break;	// 丢掉不能显示的数据
+
+		int idx = descend_indices[i].item().toInt();
+		std::cout << i << " descend: " << idx << std::endl;
+		cv::fillPoly(cv_mask, polygons[idx], cv::Scalar(std::min(255, i+1)));
+	}
+	cv::resize(cv_mask, cv_mask, cv::Size(img_size.width / ratio, img_size.height / ratio));
+	return std::make_tuple(cv_mask, descend_indices);
+}
+#else
 std::tuple<torch::Tensor, torch::Tensor> polygons2masks_overlap(cv::Size img_size, std::vector<torch::Tensor> segments, int downsample_ratio = 1)
 {
 	// 发现按原代码转换，最大面积的object没有mask，暂时找不到原因
@@ -319,7 +385,7 @@ std::tuple<torch::Tensor, torch::Tensor> polygons2masks_overlap(cv::Size img_siz
 	torch::Tensor masks = torch::from_blob(cv_mask.data, {cv_mask.rows, cv_mask.cols }, torch::kByte).clone();
 	return std::make_tuple(masks, descend_indices);
 }
-
+#endif
 std::tuple<std::string, std::string> Init_ImageAndLabel_List(std::string& path, std::vector<std::string>& img_files, std::vector<std::string>& label_files)
 {
 	std::string images_dir;
@@ -552,7 +618,8 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 	if (need_mosaic)
 	{
 		paths.push_back("");
-		shapes.push_back(std::vector<float>(6, 0.f));
+		//std::vector<float> tmp = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}  // 后三个分别对应 is_segment, overlap, downsample_ratio
+		shapes.push_back(std::vector<float>(9, 0.f));
 		std::tie(img, labels) = load_mosaic_detect(indices_index);
 		if (random_uniform() < std::get<float>(hyp["mixup"]))
 		{
@@ -586,8 +653,8 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 			cv::Scalar(114, 114, 114), false, false, augment, stride);
 
 		// (w, h, w_r, h_r, w_p, h_p)
-		shapes.emplace_back(std::vector<float>({ float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1] }));
-
+		shapes.emplace_back(std::vector<float>({ float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1], 0.f, 0.f, 0.f }));
+	
 		std::vector<std::vector<float>> bboxs;
 		load_xyhw_labels(label_files[indices_index], bboxs);
 		int labels_num = bboxs.size();
@@ -806,7 +873,13 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 	if (need_mosaic)
 	{
 		paths.push_back("");
-		shapes.push_back(std::vector<float>(6, 0.f));
+		std::vector<float> tmp = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+		if(this->overlap)	
+			tmp.push_back(1.0f);
+		else
+			tmp.push_back(0.0f);
+		tmp.push_back(float(downsample_ratio));
+		shapes.push_back(tmp);
 		std::tie(img, labels, segments) = load_mosaic_segment(indices_index);
 		if (random_uniform() < std::get<float>(hyp["mixup"]))
 		{
@@ -842,7 +915,12 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		padh = int(pad[1]);
 
 		// (w, h, w_r, h_r, w_p, h_p)
-		shapes.emplace_back(std::vector<float>({ float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1] }));
+		std::vector<float> tmp = {float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1]};
+		if(this->overlap)	
+			tmp.push_back(1.0f);
+		else
+			tmp.push_back(0.0f);
+		shapes.emplace_back(tmp);
 		std::vector<std::vector<float>> bboxs;
 		std::vector<std::vector<float>> lbs_segments;
 		read_segment_labels(label_files[indices_index], bboxs, lbs_segments);
@@ -880,6 +958,7 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 	}
 	cv::imshow("img", img_show);
 	*/
+	std::vector<cv::Mat> cv_masks;
 	if(labels.size(0))
 	{
 		labels.index_put_({torch::indexing::Slice(), torch::indexing::Slice(1, 5)},
@@ -892,42 +971,21 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		// labels[:,[1,3]] /= img.shaoe[1]
 		labels.index_put_({ torch::indexing::Slice(), torch::tensor({1, 3})}, 
 			labels.index({ torch::indexing::Slice(), torch::tensor({1, 3})}) / img.cols
-			);			
+			);		
+
 		if(overlap)
 		{
 			torch::Tensor tmp_indices;
-			std::tie(masks, tmp_indices) = polygons2masks_overlap(img.size(), segments, downsample_ratio);
-			masks = masks.unsqueeze(0);
+			cv::Mat cv_mask;
+			std::tie(cv_mask, tmp_indices) = polygons2masks_overlap(img.size(), segments, downsample_ratio);
+			cv_masks.push_back(cv_mask);
+			// masks = masks.unsqueeze(0);
 			labels = labels.index_select(0, tmp_indices);
+			if(labels.size(0) > 255)	// maske采用8UC1，只能提供255个数据，0为背景
+				labels = labels.index({torch::indexing::Slice(0, 255)});
 		}
 		else{
-			masks = polygons2masks(img.size(), segments, 1, downsample_ratio);
-		}
-	}
-	else if(overlap){
-		LOG(WARNING) << "labels size == 0 :  when overlap, insert one zeros image.";
-		int nh = img_size / downsample_ratio;
-		int nw = img_size / downsample_ratio;	
-		masks = torch::zeros({1, nh, nw},  torch::TensorOptions().dtype(torch::kByte));
-	}
-
-	if (masks.sizes().size() < 3 && labels.size(0))	// 压入空的数据
-	{
-		if (overlap)
-		{
-			std::cout << "overlap 插入空数据" << std::endl;
-			// masks = torch::zeros({ 1, img.cols / downsample_ratio, img.rows / downsample_ratio },
-			// 	torch::TensorOptions().dtype(torch::kInt32));
-			masks = torch::zeros({ 1, img.cols / downsample_ratio, img.rows / downsample_ratio },
-				torch::TensorOptions().dtype(torch::kByte));
-		}
-		else 
-		{
-			// masks = torch::zeros({ labels.size(0) , img.cols / downsample_ratio, img.rows / downsample_ratio },
-			// 	torch::TensorOptions().dtype(torch::kInt32));
-				std::cout << "overlap 插入空数据" << std::endl;
-				masks = torch::zeros({ labels.size(0) , img.cols / downsample_ratio, img.rows / downsample_ratio },
-				torch::TensorOptions().dtype(torch::kByte));
+			cv_masks = polygons2masks(img.size(), segments, 1, downsample_ratio);
 		}
 	}
 
@@ -949,11 +1007,10 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 			labels.index_put_({ torch::indexing::Slice(), 2 },
 				1 - labels.index({ torch::indexing::Slice(), 2 })
 			);
-			if(masks.sizes().size() < 2)
-				LOG(WARNING) << "masks sizes() wrong: " << masks.sizes();
-			else
-				masks = torch::flip(masks, 1);	// [1, h, w] 1==> 垂直
-
+			for(int mat_idx = 0; mat_idx < cv_masks.size(); mat_idx++)
+			{
+				cv::flip(cv_masks[mat_idx], cv_masks[mat_idx], 0);
+			}
 		}
 		if (random_uniform() < (std::get<float>(hyp["fliplr"])))
 		{
@@ -961,10 +1018,10 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 			labels.index_put_({ torch::indexing::Slice(), 1 },
 				1 - labels.index({ torch::indexing::Slice(), 1 })
 			);
-			if(masks.sizes().size() < 2)
-				LOG(WARNING) << "masks sizes() wrong: " << masks.sizes();
-			else
-				masks = torch::flip(masks, 2);
+			for(int mat_idx = 0; mat_idx < cv_masks.size(); mat_idx++)
+			{
+				cv::flip(cv_masks[mat_idx], cv_masks[mat_idx], 1);
+			}
 		}
 	}
 
@@ -976,19 +1033,47 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 			{ torch::indexing::Slice(), torch::indexing::Slice(1) },
 			labels);
 	}
-
+	else{
+		if(overlap)
+		{	// 如果没有label数据，overlap方式下需要插入一张背景图
+			int h = img.rows / downsample_ratio;
+			int w = img.cols / downsample_ratio;
+			cv::Mat cv_mask = cv::Mat::zeros(cv::Size(w, h), CV_8UC1); 
+			cv_masks.push_back(cv_mask);
+		}
+	}
 
 	cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
 	img_tensor = torch::from_blob(img.data, {img.rows, img.cols, 3}, torch::kByte).permute({2, 0, 1});
 
+	// 构造masks
 	if(overlap)
 	{
-		if(masks.sizes().size()!=3 || masks.size(0) != 1)
-			LOG(WARNING) << "overlap , masks.sizes() error: " << masks.sizes();
+		masks = torch::from_blob(cv_masks[0].data, {cv_masks[0].rows, cv_masks[0].cols}, torch::kByte).unsqueeze(0);
 	}
-	else{
-		if(masks.sizes().size()!=3 || masks.size(0) != labels_out.size(0))
-			LOG(WARNING) << "masks.sizes() error: " << masks.sizes() << " targets: " << labels_out.sizes();
+	else
+	{
+		if(cv_masks.size() == 0)
+		{	// 如果没有，压入一个[0, h, w]，占位用，确保后续跟labels一样，能够通过torch::cat
+			masks = torch::zeros({0, img.rows/downsample_ratio, img.cols/downsample_ratio}, torch::kByte);
+		}
+		else
+		{
+			std::vector<torch::Tensor> vec_masks;
+			for(int mat_idx = 0; mat_idx < cv_masks.size(); mat_idx++)
+			{
+				auto tmp_tensor = torch::from_blob(cv_masks[mat_idx].data, {cv_masks[mat_idx].rows, cv_masks[mat_idx].cols }, torch::kByte).clone();
+				vec_masks.push_back(tmp_tensor);
+			}
+			if(vec_masks.size() > 1)
+				masks = torch::stack(vec_masks, 0);
+			else if(vec_masks.size() == 1) 
+				masks = vec_masks[0].unsqueeze(0);	// [1, 640, 640]
+			else
+			{
+				masks = torch::zeros({0, img.rows/downsample_ratio, img.cols/downsample_ratio}, torch::kByte);
+			}
+		}
 	}
 
 	CustomExample ret;	// test code

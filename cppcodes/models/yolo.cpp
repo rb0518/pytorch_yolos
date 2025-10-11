@@ -213,7 +213,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl
 
         // # x(bs,351,20,20) to x(bs,3,20,20,117)
         ret[i] = ret[i].view({bs, na, no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
-        std::cout << 
+        // std::cout << ret[i].sizes() << std::endl;
         if (!is_training()) 
         {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
             bool bneed_make_grid = true;
