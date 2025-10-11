@@ -506,9 +506,12 @@ std::tuple<std::string, std::string> Init_ImageAndLabel_List(std::string& path, 
 }
 //========================   LoadImagesAndLabels ========================
 LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
-		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad)
+	int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad,
+	bool _is_segment, bool _is_overlap, int _downsample_ratio)
 	: img_size(_img_size), augment(_augment), single_cls(_single_cls), stride(_stride), pad(_pad), path(_path)
+	, is_segment(_is_segment), overlap(_is_overlap), downsample_ratio(_downsample_ratio)
 {
+	std::cout << "LoadImagesAndLabels img_size " << img_size;
 	rect = /*image_weights ? false :*/ _rect;
 	mosaic = augment == true && rect == false;
 	//mosaic = false;
@@ -526,6 +529,18 @@ LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
 
 CustomExample LoadImagesAndLabels::get(size_t index)
 {
+	if(0 == index)
+	{
+		indices = random_queue(img_files.size());
+	}
+	
+	if(is_segment)
+		return get_segment(index);
+	return get_detect(index);
+}
+
+CustomExample LoadImagesAndLabels::get_detect(size_t index)
+{
 	auto indices_index = indices[index];
 	auto need_mosaic = this->mosaic&& random_uniform() < std::get<float>(hyp["mosaic"]);
 
@@ -538,10 +553,10 @@ CustomExample LoadImagesAndLabels::get(size_t index)
 	{
 		paths.push_back("");
 		shapes.push_back(std::vector<float>(6, 0.f));
-		std::tie(img, labels) = load_mosaic(indices_index);
+		std::tie(img, labels) = load_mosaic_detect(indices_index);
 		if (random_uniform() < std::get<float>(hyp["mixup"]))
 		{
-			auto [img2, labels2] = load_mosaic(int(random_uniform(0, indices.size() - 1)));
+			auto [img2, labels2] = load_mosaic_detect(int(random_uniform(0, indices.size() - 1)));
 
 			auto r = random_beta(8.0f, 8.0f);
 			cv::Mat img1_float, img2_float;
@@ -659,11 +674,11 @@ CustomExample LoadImagesAndLabels::get(size_t index)
 	// {tensor, tensor, vector<string>, vector<vector<float> 
 	//		=> CollectBatch input: {vector<tensor>, vector<tensor>, vector<vector<string>>, vector<vector<vector<float>>>
 	//		=> CollectBatch output: {tensor, tensor, vector<string>, vector<vector<float>
-	CustomExample ret = {img_tensor.clone(), labels_out.clone(), paths, shapes};
+	CustomExample ret = {img_tensor.clone(), labels_out.clone(), paths, shapes, torch::zeros({1})};
 	return ret;
 }
 
-std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic(int index)
+std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic_detect(int index)
 {
 	int x = mosaic_border[0];
 	auto yc = int(random_uniform(-x, 2 * img_size + x));
@@ -774,26 +789,8 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic(int index)
 	return std::make_tuple(aug_img4, aug_labels);
 }
 
-//========================   LoadImagesAndLabelsAndMasks ========================
-LoadImagesAndLabelsAndMasks::LoadImagesAndLabelsAndMasks(std::string _path, VariantConfigs _hyp,
-		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad, 
-		bool _overlap, int _downsample_ratio)
-		: img_size(_img_size), augment(_augment), single_cls(_single_cls), stride(_stride), pad(_pad), path(_path),
-		overlap(_overlap), downsample_ratio(_downsample_ratio)
-{
-	rect = /*image_weights ? false :*/ _rect;
-	mosaic = augment == true && rect == false;
-	int half_size = static_cast<int>(std::trunc(float(img_size) / 2.0));
-	mosaic_border = { -half_size, -half_size };
-
-	if(_hyp.size())
-		for (auto& [k, v] : _hyp)	
-			hyp[k] = v;
-	std::tie(images_dir, labels_dir) = Init_ImageAndLabel_List(_path, img_files, label_files);
-	indices = random_queue(img_files.size());
-}
-
-CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
+//---------------------  load for segment
+CustomExample LoadImagesAndLabels::get_segment(size_t index)
 {
 	auto indices_index = indices[index];
 	auto need_mosaic = this->mosaic && random_uniform() < std::get<float>(hyp["mosaic"]);
@@ -810,10 +807,10 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 	{
 		paths.push_back("");
 		shapes.push_back(std::vector<float>(6, 0.f));
-		std::tie(img, labels, segments) = load_mosaic(indices_index);
+		std::tie(img, labels, segments) = load_mosaic_segment(indices_index);
 		if (random_uniform() < std::get<float>(hyp["mixup"]))
 		{
-			auto [img2, labels2, segments2] = load_mosaic(int(random_uniform(0, indices.size() - 1)));
+			auto [img2, labels2, segments2] = load_mosaic_segment(int(random_uniform(0, indices.size() - 1)));
 			//两幅图像进融合 mixup
 			auto r = random_beta(8.0f, 8.0f);
 			cv::Mat img1_float, img2_float;
@@ -907,6 +904,12 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			masks = polygons2masks(img.size(), segments, 1, downsample_ratio);
 		}
 	}
+	else if(overlap){
+		LOG(WARNING) << "labels size == 0 :  when overlap, insert one zeros image.";
+		int nh = img_size / downsample_ratio;
+		int nw = img_size / downsample_ratio;	
+		masks = torch::zeros({1, nh, nw},  torch::TensorOptions().dtype(torch::kByte));
+	}
 
 	if (masks.sizes().size() < 3 && labels.size(0))	// 压入空的数据
 	{
@@ -946,8 +949,10 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			labels.index_put_({ torch::indexing::Slice(), 2 },
 				1 - labels.index({ torch::indexing::Slice(), 2 })
 			);
-
-			masks = torch::flip(masks, 1);	// [1, h, w] 1==> 垂直
+			if(masks.sizes().size() < 2)
+				LOG(WARNING) << "masks sizes() wrong: " << masks.sizes();
+			else
+				masks = torch::flip(masks, 1);	// [1, h, w] 1==> 垂直
 
 		}
 		if (random_uniform() < (std::get<float>(hyp["fliplr"])))
@@ -956,8 +961,10 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 			labels.index_put_({ torch::indexing::Slice(), 1 },
 				1 - labels.index({ torch::indexing::Slice(), 1 })
 			);
-
-			masks = torch::flip(masks, 2);
+			if(masks.sizes().size() < 2)
+				LOG(WARNING) << "masks sizes() wrong: " << masks.sizes();
+			else
+				masks = torch::flip(masks, 2);
 		}
 	}
 
@@ -974,7 +981,17 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 	cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
 	img_tensor = torch::from_blob(img.data, {img.rows, img.cols, 3}, torch::kByte).permute({2, 0, 1});
 
-	CustomExampleSeg ret;	// test code
+	if(overlap)
+	{
+		if(masks.sizes().size()!=3 || masks.size(0) != 1)
+			LOG(WARNING) << "overlap , masks.sizes() error: " << masks.sizes();
+	}
+	else{
+		if(masks.sizes().size()!=3 || masks.size(0) != labels_out.size(0))
+			LOG(WARNING) << "masks.sizes() error: " << masks.sizes() << " targets: " << labels_out.sizes();
+	}
+
+	CustomExample ret;	// test code
 	ret.data = img_tensor.clone();	
 	ret.target = labels_out.clone();
 	ret.mask = masks.clone();
@@ -984,7 +1001,7 @@ CustomExampleSeg LoadImagesAndLabelsAndMasks::get(size_t index)
 };
 
 std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>> 
-	LoadImagesAndLabelsAndMasks::load_mosaic(int index)
+	LoadImagesAndLabels::load_mosaic_segment(int index)
 {
 	int x = mosaic_border[0];
 	auto yc = int(random_uniform(-x, 2 * img_size + x));
@@ -1111,7 +1128,7 @@ std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>>
 }
 
 
-std::tuple<Dataloader_Detect, int> create_dataloader(
+std::tuple<Dataloader_Custom, int> create_dataloader(
 						const std::string& path,
                         int imgsz,
 						int nc,
@@ -1121,60 +1138,39 @@ std::tuple<Dataloader_Detect, int> create_dataloader(
                         VariantConfigs& hyp,
                         bool augment,
                         float pad, 
-						bool is_val)
-{
-	int gs = stride;
-	bool rect = is_val ? true : std::get<bool>(opt["rect"]);
-	bool quad = std::get<bool>(opt["quad"]);
-	bool single_cls = nc == 1 || std::get<bool>(opt["single_cls"]);	
-	auto datasets = LoadImagesAndLabels(path, 
-										hyp,			
-										imgsz, 
-										augment, 
-										rect, 
-										single_cls, 
-										gs, 
-										pad).map(CustomCollate());
-    int num_images = *(datasets.size());
-
-	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-	Dataloader_Detect dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-                std::move(datasets), dataloader_options);
-	return std::make_tuple(std::move(dataloader), num_images);
-}
-
-std::tuple<Dataloader_Segment, int> create_dataloader_segment(
-						const std::string& path,
-                        int imgsz,
-						int nc,
-                        int batch_size,
-                        int stride,
-                        VariantConfigs& opt,
-                        VariantConfigs& hyp,
-                        bool augment,
-                        float pad,
 						bool is_val,
-						bool overlap,
+						bool is_segment,
+						bool is_overlap,
 						int downsample_ratio)
 {
 	int gs = stride;
 	bool rect = is_val ? true : std::get<bool>(opt["rect"]);
 	bool quad = std::get<bool>(opt["quad"]);
 	bool single_cls = nc == 1 || std::get<bool>(opt["single_cls"]);	
-	auto datasets = LoadImagesAndLabelsAndMasks(path, 
-							hyp, 
-							imgsz, 
-							augment,
-							rect, 
-							single_cls, 
-							gs, 
-							pad,
-							overlap,
-							downsample_ratio).map(CustomCollateSeg());
+	auto datasets = LoadImagesAndLabels(path, 
+										hyp,											
+										imgsz, 
+										augment, 
+										rect, 
+										single_cls, 
+										gs, 
+										pad,
+										is_segment,
+										is_overlap, 
+										downsample_ratio).map(CustomCollate());
     int num_images = *(datasets.size());
+
 	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-	Dataloader_Segment dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
-                 std::move(datasets), dataloader_options);
+#if 1	
+	Dataloader_Custom dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+                std::move(datasets), dataloader_options);
 	return std::make_tuple(std::move(dataloader), num_images);
+#else
+	torch::data::samplers::SequentialSampler sampler(num_images);
+	//torch::data::samplers::RandomSampler sampler(num_images);
+	Dataloader_Custom dataloader = std::make_shared<Dataloader_CutomeType>(std::move(datasets), std::move(sampler), dataloader_options);
+	return {dataloader, num_images};
+#endif	
 }
+
 

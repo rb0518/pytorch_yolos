@@ -51,21 +51,22 @@ void ConvImpl::fuse_conv_and_bn(bool fused_ /*= true*/)
             torch::nn::Conv2dOptions(in_ch, out_ch, k_size).stride(stride).
             padding(padding).
             bias(true).groups(1).dilation(1));
+        fusedconv->to(conv->parameters().begin()->device());
+        for (auto& param : fusedconv->named_parameters())
+            param->set_requires_grad(false);
 
-            for (auto& param : fusedconv->named_parameters())
-                param->set_requires_grad(false);
+        auto w_conv = conv->weight.clone().view({ out_ch, -1 });
+        auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
+        fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
 
-            auto w_conv = conv->weight.clone().view({ out_ch, -1 });
-            auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
-            fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
+        auto b_conv = torch::zeros({ conv->weight.size(0) }).to(conv->weight.device());
+        auto b_bn = bn->bias - bn->weight.mul(bn->running_mean).div(torch::sqrt(bn->running_var + 1e-5));
+        fusedconv->bias.copy_(torch::mm(w_bn, b_conv.reshape({ -1, 1 })).reshape({ -1 }) + b_bn);
 
-            auto b_conv = torch::zeros({ conv->weight.size(0) }).to(conv->weight.device());
-            auto b_bn = bn->bias - bn->weight.mul(bn->running_mean).div(torch::sqrt(bn->running_var + 1e-5));
-            fusedconv->bias.copy_(torch::mm(w_bn, b_conv.reshape({ -1, 1 })).reshape({ -1 }) + b_bn);
-
-            replace_module("conv", fusedconv);
-            
-            bfirst = false;
+        replace_module("conv", fusedconv);
+        unregister_module("bn");
+        
+        bfirst = false;
     }
     else
     {
@@ -93,7 +94,10 @@ void ConvImpl::check_args(std::vector<arg_complex>& args)
 
 torch::Tensor ConvImpl::forward(torch::Tensor x)
 {
-    return silu->forward(bn->forward(conv->forward(x)));   
+    if(fused == false)
+        return silu->forward(bn->forward(conv->forward(x)));   
+
+    return silu->forward(fusedconv->forward(x));
 }
 
 torch::Tensor ConvImpl::forward(std::vector<torch::Tensor> x)

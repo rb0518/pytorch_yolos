@@ -90,7 +90,7 @@ private:
         std::vector<torch::Tensor>,
         std::vector<torch::Tensor>>
         build_targets(const std::vector<torch::Tensor>& p, 
-            const torch::Tensor& _targets); 
+            torch::Tensor& targets); 
 
     std::shared_ptr<DetectImpl> m_ptr;
     VariantConfigs hyp;

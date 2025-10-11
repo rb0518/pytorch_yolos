@@ -69,7 +69,7 @@ cv::Mat convert_tensor_to_mat(torch::Tensor img,
     }
     else
     {
-        LOG(ERROR) << "only support [c, h, w] or [h, w] type tensor";
+        LOG(ERROR) << "only support [3, h, w] or [1, h, w] type tensor";
         if(ret_color)
             return cv::Mat::zeros(img_width, img_height, CV_8UC3);
         return cv::Mat::zeros(img_width, img_height, CV_8UC1);

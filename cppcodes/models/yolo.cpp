@@ -92,7 +92,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::v
         anchors_ = anchors_.to(x[i].device());
 
         // # x(bs,255,20,20) to x(bs,3,20,20,85)
-        ret[i] = ret[i].view({bs, this->na, this->no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
+        ret[i] = ret[i].view({bs, na, no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
 
         if (!is_training()) 
         {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
@@ -105,11 +105,16 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::v
             this->grid[i] = this->grid[i].to(x[i].device());
             this->stride = this->stride.to(x[i].device());
             this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
+
             auto splits = ret[i].sigmoid().split({2, 2, nc + 1}, 4);
-            auto xy = (splits[0] * 2 + grid[i]) * stride[i];
-            auto wh = (splits[1] * 2).pow(2) * anchor_grid[i];
-            auto y = torch::cat({xy, wh, splits[2]}, 4);   
-            z[i] = y.view({bs, na* nx * ny, no}).clone();
+            auto xy = splits[0];
+            auto wh = splits[1];
+            auto conf = splits[2];
+
+            xy = (xy * 2 + grid[i]) * stride[i];
+            wh = (wh * 2).pow(2) * anchor_grid[i];
+            auto y = torch::cat({xy, wh, conf}, 4);   
+            z[i] = y.view({bs, na * nx * ny, no}).clone();
         }
     }
 
@@ -206,9 +211,9 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl
     
         anchors_ = anchors_.to(x[i].device());
 
-        // # x(bs,255,20,20) to x(bs,3,20,20,85)
-        ret[i] = ret[i].view({bs, this->na, this->no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
-
+        // # x(bs,351,20,20) to x(bs,3,20,20,117)
+        ret[i] = ret[i].view({bs, na, no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
+        std::cout << 
         if (!is_training()) 
         {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
             bool bneed_make_grid = true;
@@ -221,10 +226,14 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl
             this->stride = this->stride.to(x[i].device());
             this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
             auto splits = ret[i].split_with_sizes({2, 2, nc + 1, no - nc - 5}, 4);
-            auto xy = (splits[0].sigmoid() * 2 + grid[i]) * stride[i];
-            auto wh = (splits[1].sigmoid() * 2).pow(2) * anchor_grid[i];
-            auto y = torch::cat({xy, wh, splits[2].sigmoid(), splits[3]}, 4);   
-            z[i] = y.view({bs, na* nx * ny, no}).clone();
+            auto xy = splits[0];
+            auto wh = splits[1];
+            auto conf = splits[2];
+            auto mask = splits[3];
+            xy = (xy.sigmoid() * 2 + grid[i]) * stride[i];
+            wh = (wh.sigmoid() * 2).pow(2) * anchor_grid[i];
+            auto y = torch::cat({xy, wh, conf.sigmoid(), mask}, 4);   
+            z[i] = y.view({bs, na * nx * ny, no}).clone();
         }
     }
 
@@ -475,8 +484,12 @@ void ModelImpl::create_modules()
         std::cout << "Create segment layer: " << std::endl;
         int nm = std::get<int>(final_layercfgs.args[2]);
         int npr = std::get<int>(final_layercfgs.args[3]);
-
-        last_module = std::make_shared<SegmentImpl>(n_classes, anchors, nm, npr, inchannels, false);
+            //c2 = make_divisible(float(c2) * width_multiple, 8);
+        int tmp_npr = npr;
+        std::cout << "Segment " << "in " << tmp_npr;
+        tmp_npr = make_divisible(float(tmp_npr) * width_multiple, 8);
+        std::cout << " after : " << tmp_npr << std::endl;
+        last_module = std::make_shared<SegmentImpl>(n_classes, anchors, nm, tmp_npr, inchannels, false);
     }
     register_module("model-" + std::to_string(layer_cfgs.size()-1), last_module);    
 }

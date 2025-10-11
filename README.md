@@ -81,3 +81,14 @@ cmake ..
 * 运行结果
 以调用jit_weights为例，epochs 30次后输出结果如下
 <img src =".\readme_images\run_sample.jpg">
+
+## Segment
+训练，目前mosaic方式可能还因为丢失box与mask不一致，程序出错，先用--rect参数来
+```bash
+./yolos --batch_size=8 --epochs=20 --jit_weights=weights/yolov5s-seg.script.pt  --img_size=640  --rect --notest=false
+```
+
+验证
+```bash
+./yolos --runtype=predict --is_segment=true --cfg=models/segment/yolov5s-seg.yaml --weights=runs/train_seg/exp1/weights/last.pt
+```

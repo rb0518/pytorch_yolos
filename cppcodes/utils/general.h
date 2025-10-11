@@ -19,20 +19,11 @@ torch::Tensor box_iou(const torch::Tensor & boxes1, const torch::Tensor & boxes2
 torch::Tensor segment2box(torch::Tensor& segments, int width, int height);
 std::vector<torch::Tensor> resample_segments(std::vector<torch::Tensor>& segments, int n = 1000);
 
-// 没有deepcopy，同时不想重构Model来支持Module.clone()
-#include "yolo.h"
-class ModelEMA {
-public:
-    ModelEMA(std::shared_ptr<Model> ptr_model, float decay = 0.9999f, int updates = 0);
-    void update(torch::nn::Module& model);
 
-    float decay_function(int x)
-    {
-        return decay_ * (1 - std::exp(-x / 2000.0f));
-    }
+torch::Tensor process_mask(const torch::Tensor& protos,           
+                            const torch::Tensor& masks_in,         
+                            const torch::Tensor& bboxes,           
+                            const std::vector<int64_t>& shape,  
+                            bool upsample = false);          
 
-public:
-    std::shared_ptr<Model> ema_model_;
-    float decay_;
-    int updates_ = 0;
-};
+torch::Tensor crop_mask(torch::Tensor masks, torch::Tensor boxes);                            

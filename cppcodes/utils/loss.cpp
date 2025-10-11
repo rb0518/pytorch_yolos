@@ -6,31 +6,6 @@
 #include <torch/torch.h>
 #include <cmath>
 
-torch::Tensor crop_mask(torch::Tensor masks, torch::Tensor boxes)
-{
-    int n = masks.size(0);
-    int h = masks.size(1);
-    int w = masks.size(2);
-
-    // 将boxes分割为四个坐标分量
-    auto x1 = boxes.select(1, 0).unsqueeze(1).unsqueeze(2);  // x1 shape(1,1,n)
-    auto y1 = boxes.select(1, 1).unsqueeze(1).unsqueeze(2);  // y1 shape(1,1,n)
-    auto x2 = boxes.select(1, 2).unsqueeze(1).unsqueeze(2);  // x2 shape(1,1,n)
-    auto y2 = boxes.select(1, 3).unsqueeze(1).unsqueeze(2);  // y2 shape(1,1,n)
-
-    // 创建行和列的索引张量
-    auto r = torch::arange(0, w).to(masks.device()).to(masks.dtype())
-        .unsqueeze(0).unsqueeze(0);  // rows shape(1,1,w)
-    auto c = torch::arange(0, h).to(masks.device()).to(masks.dtype())
-        .unsqueeze(0).unsqueeze(2);  // cols shape(1,h,1)
-
-    // 创建裁剪掩码
-    auto mask = (r >= x1) * (r < x2) * (c >= y1) * (c < y2);
-
-    // 应用掩码到输入mask
-    return masks * mask;
-}    
-
 torch::Tensor single_mask_loss(torch::Tensor gt_mask, 
                               torch::Tensor pred, 
                               torch::Tensor proto, 
@@ -42,7 +17,9 @@ torch::Tensor single_mask_loss(torch::Tensor gt_mask,
     //     " proto: " << proto.sizes() << " xyxy " << xyxy.sizes() <<
     //     " area " << area.sizes() << std::endl;
     // 计算预测mask: (n,32) @ (32,80*80) -> (n,80*80) -> (n,80,80)
-    auto pred_mask = torch::matmul(pred, proto.view({nm, -1})).view({-1, proto.size(1), proto.size(2)});
+    int h = proto.size(1);
+    int w = proto.size(2);
+    auto pred_mask = torch::matmul(pred, proto.view({nm, -1})).view({-1, h, w});
     //std::cout << "pred_mask" << pred_mask.sizes() << std::endl;
     // 计算二元交叉熵损失
     auto loss = torch::binary_cross_entropy_with_logits(pred_mask, gt_mask, {}, {}, at::Reduction::None);
@@ -196,13 +173,10 @@ std::tuple<torch::Tensor, torch::Tensor> ComputeLoss::operator()(const std::vect
             {   
                 auto pmask = ps_split[4];
                 //std::cout << "pmask " << pmask.sizes() << std::endl;
-
-                // 后续修改函数定义，不用const，目前不让改动是为了后续能够画图显示调试信息
-                //auto mask_inter = masks.clone();
                 auto mask_shape = masks.sizes();
                 if(mask_shape[mask_shape.size()-2] != mask_h ||
                     mask_shape[mask_shape.size()-1] != mask_w)
-                {
+                {   // unsqueeze是因为 nn.functional::interpolate 函数有维数要求
                     masks = torch::nn::functional::interpolate(
                         masks.unsqueeze(0), torch::nn::functional::InterpolateFuncOptions()
                         .size(std::vector<int64_t>{mask_h, mask_w}).mode(torch::kNearest)).squeeze(0);                   
@@ -297,10 +271,10 @@ std::tuple<std::vector<torch::Tensor>,
     std::vector<torch::Tensor>,
     std::vector<torch::Tensor>, // tidxs
     std::vector<torch::Tensor>> // xywhn
-    ComputeLoss::build_targets(const std::vector<torch::Tensor>& p, const torch::Tensor& _targets)  
+    ComputeLoss::build_targets(const std::vector<torch::Tensor>& p, torch::Tensor& targets)  
 {
     // na = 3, nt = 标签数
-    int nt = _targets.size(0);    
+    int nt = targets.size(0);    
 
     std::vector<torch::Tensor> tcls, tbox, anch;
     std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>> indices;
@@ -308,17 +282,16 @@ std::tuple<std::vector<torch::Tensor>,
     std::vector<torch::Tensor> tidxs;
     std::vector<torch::Tensor> xywhn;
     // 初始化增益系数
-    auto gain = torch::ones({8}).to(_targets.device());
-    auto ai = torch::arange({na}).to(_targets.device()).to(torch::kFloat)
+    auto gain = torch::ones({8}).to(targets.device());
+    auto ai = torch::arange({na}).to(targets.device()).to(torch::kFloat)
         .view({ na, 1 }).repeat({ 1, nt });
-    auto targets = _targets.clone();
 
     // 暂时未考虑overlap模式
 
-    auto ti = torch::arange({nt}).to(_targets.device()).to(torch::kFloat)
+    auto ti = torch::arange({nt}).to(targets.device()).to(torch::kFloat)
         .view({1, nt}).repeat({na, 1});
 
-    targets = torch::cat({ _targets.repeat({na, 1, 1}), 
+    targets = torch::cat({ targets.repeat({na, 1, 1}), 
                 ai.index({"...", torch::indexing::None}),
                 ti.index({"...", torch::indexing::None})}, 
                 2);
@@ -329,7 +302,7 @@ std::tuple<std::vector<torch::Tensor>,
                                 {1,0}, 
                                 {0,1}, 
                                 {-1,0}, 
-                                {0,-1} }).to(_targets.device()).to(torch::kFloat) * g;
+                                {0,-1} }).to(targets.device()).to(torch::kFloat) * g;
 
     for (int i = 0; i < this->nl; ++i) 
     {

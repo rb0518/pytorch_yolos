@@ -130,17 +130,19 @@ std::vector<torch::Tensor> non_max_suppression(
     const std::vector<std::vector<int>>& classes,
     bool agnostic,
     bool multi_label,
-    const std::vector<std::vector<float>>& labels
+    const std::vector<std::vector<float>>& labels,
+    int max_det /*= 300*/,
+    int nm /*= 0*/  // number of masks
 ) 
 {
-    int nc = prediction.size(2) - 5;  // number of classes
+    int bs = prediction.size(0);        // batch size
+    int nc = prediction.size(2) - nm - 5;  // number of classes
     auto xc = prediction.index({"...", 4}) > conf_thres; // candidates
     //std::cout << "input: " << prediction.sizes() << " " << xc.sizes() << std::endl;
 
     // 参数初始化
-    constexpr int min_wh = 2;
-    constexpr int max_wh = 4096;
-    constexpr int max_det = 300;
+    //constexpr int min_wh = 2;
+    constexpr int max_wh = 7680;    // 10-9 4096==>7680
     constexpr int max_nms = 30000;
     constexpr float time_limit = 30.0;
     bool redundant = true;
@@ -149,6 +151,9 @@ std::vector<torch::Tensor> non_max_suppression(
     multi_label &= (nc > 1);
 
     auto t = std::chrono::steady_clock::now();
+
+    int mi = 5 + nc;    // mask start index
+
     std::vector<torch::Tensor> output;
     // auto output = std::vector<torch::Tensor>(prediction.size(0), torch::zeros({ 0, 6 }, prediction.options()));
 
@@ -160,7 +165,7 @@ std::vector<torch::Tensor> non_max_suppression(
 
         // 应用置信度筛选
         x = x.index({ xc[xi] });
-//        std::cout << xi << " x " << x.sizes() << std::endl;
+        //std::cout << xi << " x " << x.sizes() << std::endl;
         // ???添加先验标签，先不处理
         /*
         if (labels.size() > 0 && labels[xi].size() > 0) {
@@ -176,32 +181,37 @@ std::vector<torch::Tensor> non_max_suppression(
         if (x.size(0) == 0)
         {
 //            std::cout << xi << " after x[xc[xi]] return 0 " << std::endl;
-            output.push_back(torch::zeros({0, 6}));
+            output.push_back(torch::zeros({0, 6 + nm}));
             continue;
         }
 
         // 计算最终置信度
         x.index_put_(
-            { torch::indexing::Slice(), torch::indexing::Slice(5) },
-            x.index({ torch::indexing::Slice(), torch::indexing::Slice(5)}) * x.index({ torch::indexing::Slice(), 4 }).unsqueeze(1)
+            { torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None)},
+            x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None)}) * x.index({ torch::indexing::Slice(), torch::indexing::Slice(4, 5)})
             );
 
         // 坐标转换
         auto box = xywh2xyxy(x.index({ torch::indexing::Slice(), torch::indexing::Slice(0, 4) }));
-//        std::cout << "box " << box.sizes() << "multi_label: " << multi_label << std::endl;
+        // zero columns if no masks
+        auto mask = x.index({torch::indexing::Slice(), torch::indexing::Slice(mi, torch::indexing::None)});
+        // std::cout << "box " << box.sizes() << "multi_label: " << multi_label <<" mask: " << mask.sizes() << std::endl;
+
         // 多标签处理
         if (multi_label) {
-            auto ijcls = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5) }) > conf_thres;
+            auto ijcls = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, mi) }) > conf_thres;
             auto ijcls_t = ijcls.nonzero().t();
             auto i = ijcls_t[0];
             auto j = ijcls_t[1];
             auto box_i = box.index({ i });
             auto x_ij = x.index({i, j+5}).unsqueeze(-1);
-            x = torch::cat({ box_i, x_ij, j.unsqueeze(-1).to(torch::kFloat) }, 1);
+            auto mask_i = mask.index({i});
+            std::cout << "box_i: " << box_i.sizes() << " mask_i " << mask_i.sizes() << std::endl;
+            x = torch::cat({ box_i, x_ij, j.unsqueeze(-1).to(torch::kFloat), mask_i}, 1);
         }
         else {
-            auto [conf, j] = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5) }).max(1, true);
-            auto x_filtered = torch::cat({ box, conf, j.to(torch::kFloat)}, 1);
+            auto [conf, j] = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, mi) }).max(1, true);
+            auto x_filtered = torch::cat({ box, conf, j.to(torch::kFloat), mask}, 1);
             auto conf_sel = conf > conf_thres;
 //            std::cout << "x_filtered: " << x_filtered.sizes() << " conf " << conf_sel.sizes() << std::endl;
             x = x_filtered.index({conf_sel.squeeze(1)});
@@ -218,7 +228,7 @@ std::vector<torch::Tensor> non_max_suppression(
         if(x.size(0) ==  0)
         {
 //            std::cout << " no boxes " << std::endl;
-            output.push_back(torch::zeros({0, 6}));
+            output.push_back(torch::zeros({0, 6 + nm}));
             continue;
         }
 
@@ -230,6 +240,7 @@ std::vector<torch::Tensor> non_max_suppression(
         // batched nms
         auto x_cpu = x.cpu();
 
+        // Batched NMS
         auto c = x.index({torch::indexing::Slice(), 5});
         if(agnostic)
             c = c * 0;
@@ -270,11 +281,11 @@ std::vector<torch::Tensor> non_max_suppression(
             auto ret_box = x_cpu.index({box_sel});
             output.push_back(ret_box);
 
-//            std::cout << xi << " return " << ret_box.sizes() << std::endl;
+            std::cout << xi << " return " << ret_box.sizes() << std::endl;
         }
         else
         {
-            output.push_back(torch::zeros({0, 6}));
+            output.push_back(torch::zeros({0, 6 + nm}));
         }
  
         // 检查时间限制
@@ -323,7 +334,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     for (const auto& param : jit_model.named_parameters())
     {
         jit_params[param.name] = param.value;
-        std::cout << "jit_model:  " << param.name << std::endl;
+        //std::cout << "jit_model:  " << param.name << std::endl;
     }
     auto jit_params_count = jit_params.size();
     int n_params = 0;
@@ -334,7 +345,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         torch::AutoGradMode enable_grad(false);
         //torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
         std::string str_name = param.key();
-        std::cout << "model named_parameters: " << str_name << std::endl;
+        //std::cout << "model named_parameters: " << str_name << std::endl;
         //  "model-1.m-1.bn1.bias" ==> "model.1.m.1.bn1.bias
         str_name = std::regex_replace(str_name, std::regex("-"), ".");
         

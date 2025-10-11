@@ -50,12 +50,12 @@ torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, 
 }
 
 
-void test(
+Dataloader_Custom test(
     std::shared_ptr<Model> model,   // model or nullpytr
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
-    Dataloader_Detect val_dataloader, // if not val, set = nullptr
+    Dataloader_Custom val_dataloader, // if not val, set = nullptr
     int val_total_number,
     std::string val_path,
     std::string save_dir_,
@@ -98,13 +98,13 @@ void test(
         if(false == std::filesystem::exists(std::filesystem::path(cfg_file)))
         {
             LOG(ERROR) << "cfg_file: " << cfg_file << " not exist." ;
-            return;
+            return nullptr;
         }
         std::string weights_file = std::filesystem::path(root_).append(weights).string();
         if(false == std::filesystem::exists(weights_file))
         {
             LOG(ERROR) << "weights file: " << weights << " not exist." ;
-            return;
+            return nullptr;
         }
         model_tmp = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false);
         model_ptr = model_tmp->get();
@@ -119,10 +119,10 @@ void test(
         else
         {
             LOG(ERROR) << "*** Load weight error! ";
-            return;
+            return nullptr;
         }
     }
-    
+    bool is_segment = model_ptr->is_segment;
     model_ptr->eval();
     if(false == is_training)
         std::cout << "Model create over..." << std::endl;
@@ -130,8 +130,8 @@ void test(
     iouv = iouv.to(device);
     auto niou = iouv.numel();
 
-    std::shared_ptr<LoadImagesAndLabels> val_load_datasets{nullptr};
     int num_images = 0;
+    
     if(val_dataloader == nullptr)
     {
         bool augment = false;
@@ -140,8 +140,9 @@ void test(
         float pad = 0.5f;
         std::cout << "val path: " << val_path << std::endl;
         VariantConfigs hyp = set_cfg_hyp_default();
-        std::tie(val_dataloader, num_images) = create_dataloader(val_path, imgsz, nc, batch_size, gs,
-                                                                opt, hyp, augment, pad, true); 
+        std::tie(val_dataloader, num_images) = create_dataloader(val_path,
+                                                                imgsz, nc, batch_size, gs,
+                                                                opt, hyp, augment, pad, true, is_segment);  // default follow: false, 4
     }
     else{
         num_images = val_total_number;
@@ -167,6 +168,9 @@ void test(
         img = img.to(device).to(torch::kFloat);
         img = img / 255.f;
         targets = targets.to(device);
+        auto masks = batch.mask;
+        masks = masks.to(torch::kFloat);
+        masks = masks.to(device);
 
         int nb = img.size(0);
         int height = img.size(2);
@@ -182,10 +186,10 @@ void test(
 
         
         torch::NoGradGuard nograd;
-        torch::Tensor out;
+        torch::Tensor preds;
         std::vector<torch::Tensor> train_out;
-        torch::Tensor out_seg;
-        std::tie(out, train_out, out_seg) = model_ptr->forward(img);
+        torch::Tensor protos;
+        std::tie(preds, train_out, protos) = model_ptr->forward(img);
         if (save_pred)
         {
             if (batch_i < 3)
@@ -194,7 +198,7 @@ void test(
                 plot_images(img.clone().to(torch::kCPU), targets.clone().to(torch::kCPU), save_dir, save_name, true, cls_names);
             }
         }
-        //std::cout << "out: " << out.sizes() << std::endl;
+        //std::cout << "preds: " << preds.sizes() <<" protos: " << protos.sizes() << std::endl;
 
 
         // Compute loss
@@ -213,8 +217,10 @@ void test(
             auto selected = get_onebatchlabels(targets, i);
             lb.push_back(selected);
         }
-        std::vector<torch::Tensor> out_vc = non_max_suppression(out, conf_thres, iou_thres, {}, 
-            false, true, /*lb*/{});
+
+        int number_mask = is_segment ? 32 : 0;  // 后续直接从模型中读取，  ，
+        std::vector<torch::Tensor> out_vc = non_max_suppression(preds, conf_thres, iou_thres, {}, 
+            false, true, /*lb*/{}, 300, number_mask);
 
         if (save_pred)
         {
@@ -360,5 +366,7 @@ void test(
         map50.item().toFloat(), map.item().toFloat());
     std::string result_str = std::string(temp_strs);
     std::cout << result_str << std::endl;
+
+    return std::move(val_dataloader);
 }
 

@@ -69,7 +69,9 @@ std::vector<torch::Tensor> non_max_suppression(
     const std::vector<std::vector<int>>& classes = {},
     bool agnostic = false,
     bool multi_label = false,
-    const std::vector<std::vector<float>>& labels = {}
+    const std::vector<std::vector<float>>& labels = {},
+    int max_det = 300,
+    int nm = 0  // number of masks
 );
 
 /*

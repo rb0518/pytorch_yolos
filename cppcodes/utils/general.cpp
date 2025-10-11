@@ -308,52 +308,6 @@ std::vector<torch::Tensor> resample_segments(std::vector<torch::Tensor>& segment
 	return resampled_segments;
 }
 
-ModelEMA::ModelEMA(std::shared_ptr<Model> ptr_model, float decay, int updates)
-{
-    decay_ = decay;
-    updates_ = updates;
-    auto model = ptr_model->get();
-    // const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo
-    ema_model_ = std::make_shared<Model>(model->cfgfile, model->n_classes, 
-        model->image_width, model->image_height, model->n_channels, model->b_showdebug);
-    (*ema_model_)->eval();
-
-    for (auto& param : (*ema_model_)->parameters()) {
-        param.set_requires_grad(false);
-    }
-}
-
-void ModelEMA::update(torch::nn::Module& model)
-{
-    (*ema_model_)->to(model.parameters().begin()->device());
-
-    {
-        torch::NoGradGuard nograd;
-        updates_ += 1;
-        float d = decay_function(updates_);
-
-        std::unordered_map<std::string, torch::Tensor> model_params;
-        for (const auto& param : model.named_parameters())
-        {
-            model_params[param.key()] = param.value();
-            // std::cout << "model_params key: " << param.key() << std::endl;
-        }
-
-        for (auto& param : (*ema_model_)->named_parameters())
-        {
-            std::string str_name = param.key();
-            // std::cout << "ema_model_ key: " << str_name << std::endl;
-
-            if (param.value().is_floating_point())
-            {
-                auto v = param.value().clone();
-                v = v * d;
-                v = v + (1.f - d) * model_params[str_name].detach();
-                param.value().data().copy_(v.data());
-            }
-        }
-    }
-}
 #include <fstream>
 std::string getLastLine(const std::string& filename) 
 {
@@ -370,4 +324,69 @@ std::string getLastLine(const std::string& filename)
     std::string lastLine;
     std::getline(file, lastLine); // 再读取下一行，就是最后一行了
     return lastLine;
+}
+
+torch::Tensor crop_mask(torch::Tensor masks, torch::Tensor boxes)
+{
+    int n = masks.size(0);
+    int h = masks.size(1);
+    int w = masks.size(2);
+
+    // 将boxes分割为四个坐标分量
+    auto x1 = boxes.select(1, 0).unsqueeze(1).unsqueeze(2);  // x1 shape(1,1,n)
+    auto y1 = boxes.select(1, 1).unsqueeze(1).unsqueeze(2);  // y1 shape(1,1,n)
+    auto x2 = boxes.select(1, 2).unsqueeze(1).unsqueeze(2);  // x2 shape(1,1,n)
+    auto y2 = boxes.select(1, 3).unsqueeze(1).unsqueeze(2);  // y2 shape(1,1,n)
+
+    // 创建行和列的索引张量
+    auto r = torch::arange(0, w).to(masks.device()).to(masks.dtype())
+        .unsqueeze(0).unsqueeze(0);  // rows shape(1,1,w)
+    auto c = torch::arange(0, h).to(masks.device()).to(masks.dtype())
+        .unsqueeze(0).unsqueeze(2);  // cols shape(1,h,1)
+
+    // 创建裁剪掩码
+    auto mask = (r >= x1) * (r < x2) * (c >= y1) * (c < y2);
+
+    // 应用掩码到输入mask
+    return masks * mask;
+} 
+
+torch::Tensor process_mask(const torch::Tensor& protos,      // 原型掩码 [C, H, W]     
+                        const torch::Tensor& masks_in,    // 输入特征 [N, C]     
+                        const torch::Tensor& bboxes,      // 边界框 [N, 4]     
+                        const std::vector<int64_t>& shape,  // 输入图像尺寸 [H, W]
+                        bool upsample /*= false*/)         // 是否上采样 
+{     // 获取原型掩码尺寸     
+    int64_t c = protos.size(0);          // 通道数     
+    int64_t mh = protos.size(1);         // 原型高度     
+    int64_t mw = protos.size(2);         // 原型宽度          
+    
+    auto proto = protos.clone();
+    proto = proto.to(torch::kFloat).view({c, -1});
+
+    // 计算掩码分数 (N, H*W) -> (N, H, W)     
+    auto masks = (masks_in.matmul(proto)).sigmoid().view({-1, mh, mw});          // 调整边界框尺寸到原型掩码空间     
+
+    auto downsampled_bboxes = bboxes.clone();     
+    downsampled_bboxes = downsampled_bboxes.to(downsampled_bboxes.options().dtype(at::kFloat));          
+    // 宽度缩放     
+    downsampled_bboxes.select(1, 0) *= mw / static_cast<float>(shape[1]);     
+    downsampled_bboxes.select(1, 2) *= mw / static_cast<float>(shape[1]);          
+    
+    // 高度缩放     
+    downsampled_bboxes.select(1, 1) *= mh / static_cast<float>(shape[0]);     
+    downsampled_bboxes.select(1, 3) *= mh / static_cast<float>(shape[0]);          
+    
+    // 裁剪掩码区域     
+    masks = crop_mask(masks, downsampled_bboxes);     
+
+    // 如果需要上采样     
+    if (upsample) {         // 双线性插值到输入图像尺寸         
+        masks = torch::nn::functional::interpolate(masks.unsqueeze(0), // 增加批次维度             
+                torch::nn::functional::InterpolateFuncOptions()
+        .size(std::vector<int64_t>{shape[0], shape[1]})  // 显式指定输出尺寸
+        .mode(torch::kNearest)).squeeze(0);     
+    }          
+    // 二值化处理，移到外部灵活处理    
+    return masks; 
 }

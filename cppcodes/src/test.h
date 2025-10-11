@@ -29,12 +29,12 @@ def test(data,
 
 #include "datasets.h"
 
-void test(
+Dataloader_Custom test(
     std::shared_ptr<Model> model,   // model or nullpytr
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
-    Dataloader_Detect val_dataloader, // if not val, set = nullptr
+    Dataloader_Custom val_dataloader, // if not val, set = nullptr
     int val_total_number,
     std::string val_path,
     std::string save_dir_,
