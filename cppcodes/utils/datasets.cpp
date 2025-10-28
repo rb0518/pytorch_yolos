@@ -571,57 +571,98 @@ std::tuple<std::string, std::string> Init_ImageAndLabel_List(std::string& path, 
 	return std::make_tuple(images_dir, labels_dir);
 }
 //========================   LoadImagesAndLabels ========================
-LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
-	int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad,
-	bool _is_segment, bool _is_overlap, int _downsample_ratio)
-	: img_size(_img_size), augment(_augment), single_cls(_single_cls), stride(_stride), pad(_pad), path(_path)
-	, is_segment(_is_segment), overlap(_is_overlap), downsample_ratio(_downsample_ratio)
+LoadImagesAndLabels::LoadImagesAndLabels(std::string _path, VariantConfigs* _args, int _stride /*= 32*/, bool _is_segment/*= false*/)
+	: path(_path), args(_args), is_segment(_is_segment), stride(_stride)
 {
-	std::cout << "LoadImagesAndLabels img_size " << img_size;
-	rect = /*image_weights ? false :*/ _rect;
-	mosaic = augment == true && rect == false;
-	//mosaic = false;
+	img_size = std::get<int>(args->at("imgsz"));
+	if(std::get<std::string>(args->at("mode")) == "train")
+	{
+		augment = true;
+		rect = std::get<bool>(args->at("rect"));
+		this->mosaic = augment == true && rect == false;		
+	}	
+	else
+	{
+		augment = std::get<bool>(args->at("augment"));	// predict or val 才看augment设置
+		this->rect = std::get<bool>(args->at("rect"));
+		this->mosaic = augment == true && rect == false;
+	}
+
 	int half_size = static_cast<int>(std::trunc(float(img_size) / 2.0));
 	mosaic_border = { -half_size, -half_size };
+	//mosaic = (augment == true && rect == false) ? true : false;
+	single_cls = std::get<bool>(args->at("single_cls"));
 
-	if(_hyp.size())
-		for (auto& [k, v] : _hyp)	
-			hyp[k] = v;
+	if(is_segment)
+	{
+		overlap = std::get<bool>(args->at("overlap_mask"));
+		downsample_ratio = std::get<int>(args->at("mask_ratio"));
+	}
 
 	std::tie(images_dir, labels_dir) = Init_ImageAndLabel_List(_path, img_files, label_files);
 
 	indices = random_queue(img_files.size());
 }
-
+#ifdef USE_YOLOCustom
+YoloCustomExample LoadImagesAndLabels::get(size_t index)
+#else
 CustomExample LoadImagesAndLabels::get(size_t index)
+#endif
 {
 	if(0 == index)
 	{
 		indices = random_queue(img_files.size());
 	}
-	
-	if(is_segment)
-		return get_segment(index);
-	return get_detect(index);
+	CustomExample det;
+	if (is_segment)
+		det = get_segment(index);
+	else
+		det = get_detect(index);
+#ifdef USE_YOLOCustom
+	YoloCustomExample ret; //(c10::StringType::get(), c10::AnyType::get());
+	//torch::List<std::string> im_files;
+	//im_files.push_back(det.path[0]);
+
+	//ret.insert({"im_file", torch::IValue(im_files)});
+	ret.insert("ori_shape", det.ori_shape);
+	ret.insert("resized_shape", det.resized_shape);
+
+	ret.insert("img", det.data);
+	auto batch_index = det.target.index({ torch::indexing::Slice(), 0 }).clone();
+	auto t_cls = det.target.index({ torch::indexing::Slice(), 1 }).clone();
+	auto bboxes = det.target.index({ torch::indexing::Slice(), torch::indexing::Slice(2, torch::indexing::None) }).clone();
+	ret.insert("cls", t_cls);
+	ret.insert("bboxes", bboxes);
+	ret.insert("batch_idx", batch_index);
+
+	if (is_segment)
+		ret.insert("mask", det.mask);
+
+	return ret;
+#else
+	return det;
+#endif
 }
 
 CustomExample LoadImagesAndLabels::get_detect(size_t index)
 {
 	auto indices_index = indices[index];
-	auto need_mosaic = this->mosaic&& random_uniform() < std::get<float>(hyp["mosaic"]);
-
+	auto need_mosaic = this->mosaic && random_uniform() < std::get<float>(args->at("mosaic"));
+	// if(index == 0)
+	// 	std::cout << "detect mosaic " << (mosaic ? "True" : "False") << ", mosaic threshold: " <<  std::get<float>(args->at("mosaic")) 
+	// 			<< ", rect: " << (rect? "True": "False") << ", need_mosaic: " << (need_mosaic ? "True" : "False") << std::endl;
 	cv::Mat img;
 	torch::Tensor labels;
 	torch::Tensor img_tensor;
 	std::vector<std::string> paths;
-	std::vector<std::vector<float>> shapes;
+	torch::Tensor ori_shape = torch::zeros({2}, torch::kInt32);			// mosaic处理下，这两个变量后续不用，不用处理
+	torch::Tensor resized_shape = torch::zeros({2}, torch::kInt32);
+
 	if (need_mosaic)
 	{
 		paths.push_back("");
-		//std::vector<float> tmp = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}  // 后三个分别对应 is_segment, overlap, downsample_ratio
-		shapes.push_back(std::vector<float>(9, 0.f));
 		std::tie(img, labels) = load_mosaic_detect(indices_index);
-		if (random_uniform() < std::get<float>(hyp["mixup"]))
+		if (random_uniform() < std::get<float>(args->at("mixup")))
 		{
 			auto [img2, labels2] = load_mosaic_detect(int(random_uniform(0, indices.size() - 1)));
 
@@ -653,7 +694,10 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 			cv::Scalar(114, 114, 114), false, false, augment, stride);
 
 		// (w, h, w_r, h_r, w_p, h_p)
-		shapes.emplace_back(std::vector<float>({ float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1], 0.f, 0.f, 0.f }));
+		ori_shape[0] = hw0[1];	// ori_shape: w, h
+		ori_shape[1] = hw0[0];
+		resized_shape[0] = hw[1];
+		resized_shape[1] = hw[1];
 	
 		std::vector<std::vector<float>> bboxs;
 		load_xyhw_labels(label_files[indices_index], bboxs);
@@ -680,17 +724,9 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 
 	if (augment)
 	{	
-		/*
-		if(false == need_mosaic)
-			std::tie(img, labels) = random_perspective(img, labels,
-				int(std::get<float>(hyp["degrees"])), std::get<float>(hyp["translate"]),
-				std::get<float>(hyp["scale"]), int(std::get<float>(hyp["shear"])),
-				std::get<float>(hyp["perspective"]), mosaic_border);
-		*/
-	
-		augment_hsv(img, std::get<float>(hyp["hsv_h"]),
-							std::get<float>(hyp["hsv_s"]),
-							std::get<float>(hyp["hsv_v"]));
+		augment_hsv(img, std::get<float>(args->at("hsv_h")),
+							std::get<float>(args->at("hsv_s")),
+							std::get<float>(args->at("hsv_v")));
 	}
 
 	if(labels.size(0))
@@ -710,14 +746,14 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 
 	if (augment)
 	{
-		if(random_uniform() < (std::get<float>(hyp["flipud"])))
+		if(random_uniform() < (std::get<float>(args->at("flipud"))))
 		{
 			cv::flip(img, img, 0);
 			labels.index_put_({torch::indexing::Slice(), 2},
 				1 - labels.index({torch::indexing::Slice(), 2})
 				);
 		}
-		if (random_uniform() < (std::get<float>(hyp["fliplr"])))
+		if (random_uniform() < (std::get<float>(args->at("fliplr"))))
 		{
 			cv::flip(img, img, 1);
 			labels.index_put_({torch::indexing::Slice(), 1},
@@ -741,7 +777,7 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 	// {tensor, tensor, vector<string>, vector<vector<float> 
 	//		=> CollectBatch input: {vector<tensor>, vector<tensor>, vector<vector<string>>, vector<vector<vector<float>>>
 	//		=> CollectBatch output: {tensor, tensor, vector<string>, vector<vector<float>
-	CustomExample ret = {img_tensor.clone(), labels_out.clone(), paths, shapes, torch::zeros({1})};
+	CustomExample ret = {img_tensor.clone(), labels_out.clone(), paths, ori_shape, resized_shape, torch::zeros({1})};
 	return ret;
 }
 
@@ -750,9 +786,9 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic_detect(int i
 	int x = mosaic_border[0];
 	auto yc = int(random_uniform(-x, 2 * img_size + x));
 	auto xc = int(random_uniform(-x, 2 * img_size + x));
-
 	cv::Mat img4 = cv::Mat(img_size*2, img_size*2, CV_8UC3, cv::Scalar(114,114,114));
 	torch::Tensor labels4;
+
 
 	std::vector<int> img_idx;
 	img_idx.emplace_back(index);
@@ -816,11 +852,10 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic_detect(int i
 		// 拷贝数据至目标roi区域
 		cv::Mat roi = img4(cv::Rect(x1a, y1a, x2a - x1a, y2a - y1a));
 		img(cv::Rect(x1b, y1b, x2b - x1b, y2b - y1b)).copyTo(roi);
-
+		//cv::imshow("img4", img4);
 		auto padw = x1a - x1b;
 		auto padh = y1a - y1b;
 
-		// ��ȡlabels, ???��ʱδ��segment
 		std::vector<std::vector<float>> bboxs;
 		load_xyhw_labels(label_files[img_idx[i]], bboxs);
 		int labels_num = bboxs.size();
@@ -849,10 +884,10 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic_detect(int i
 
 	auto [aug_img4, aug_labels, _] = random_perspective(img4, labels4, 
 			{},		// 保持segment版本一致，添加空队列
-			int(std::get<float>(hyp["degrees"])), std::get<float>(hyp["translate"]),
-			std::get<float>(hyp["scale"]), int(std::get<float>(hyp["shear"])),
-			std::get<float>(hyp["perspective"]), mosaic_border);
-
+			int(std::get<float>(args->at("degrees"))), std::get<float>(args->at("translate")),
+			std::get<float>(args->at("scale")), int(std::get<float>(args->at("shear"))),
+			std::get<float>(args->at("perspective")), mosaic_border);
+	//std::cout << "after random_perspective: " << aug_labels.sizes() << std::endl;
 	return std::make_tuple(aug_img4, aug_labels);
 }
 
@@ -860,12 +895,16 @@ std::tuple<cv::Mat, torch::Tensor> LoadImagesAndLabels::load_mosaic_detect(int i
 CustomExample LoadImagesAndLabels::get_segment(size_t index)
 {
 	auto indices_index = indices[index];
-	auto need_mosaic = this->mosaic && random_uniform() < std::get<float>(hyp["mosaic"]);
+	auto need_mosaic = this->mosaic && random_uniform() < std::get<float>(args->at("mosaic"));
+	// if(index == 0)
+	// 	std::cout << "mosaic " << (mosaic ? "True" : "False") << " mosaic threshold: " <<  std::get<float>(args->at("mosaic")) << std::endl;
+
 	cv::Mat img;
 	torch::Tensor labels;
 	torch::Tensor img_tensor;
 	std::vector<std::string> paths;
-	std::vector<std::vector<float>> shapes;
+	torch::Tensor ori_shape = torch::zeros({2}, torch::kInt32);
+	torch::Tensor resized_shape = torch::zeros({2}, torch::kInt32);
 	std::vector<torch::Tensor> segments;
 
 	torch::Tensor masks = torch::zeros({ 1 });	// 返回的masks[1, h, w] or [n, h, w]
@@ -873,15 +912,8 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 	if (need_mosaic)
 	{
 		paths.push_back("");
-		std::vector<float> tmp = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f};
-		if(this->overlap)	
-			tmp.push_back(1.0f);
-		else
-			tmp.push_back(0.0f);
-		tmp.push_back(float(downsample_ratio));
-		shapes.push_back(tmp);
 		std::tie(img, labels, segments) = load_mosaic_segment(indices_index);
-		if (random_uniform() < std::get<float>(hyp["mixup"]))
+		if (random_uniform() < std::get<float>(args->at("mixup")))
 		{
 			auto [img2, labels2, segments2] = load_mosaic_segment(int(random_uniform(0, indices.size() - 1)));
 			//两幅图像进融合 mixup
@@ -905,7 +937,10 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		std::string filename = img_files[indices_index];
 		paths.emplace_back(filename);
 		std::tie(img, hw0, hw) = load_image(filename, img_size, augment);
-
+		ori_shape[0] = hw0[1];
+		ori_shape[1] = hw0[0];
+		resized_shape[0] = hw[1];
+		resized_shape[1] = hw[0];
 		std::vector<float> ratio, pad;
 		std::tie(img, ratio, pad) = letterbox(img, std::make_pair(img_size, img_size),
 			cv::Scalar(114, 114, 114), false, false, augment, stride);
@@ -915,12 +950,6 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		padh = int(pad[1]);
 
 		// (w, h, w_r, h_r, w_p, h_p)
-		std::vector<float> tmp = {float(hw0[1]), float(hw0[0]), ratio[0], ratio[1], pad[0], pad[1]};
-		if(this->overlap)	
-			tmp.push_back(1.0f);
-		else
-			tmp.push_back(0.0f);
-		shapes.emplace_back(tmp);
 		std::vector<std::vector<float>> bboxs;
 		std::vector<std::vector<float>> lbs_segments;
 		read_segment_labels(label_files[indices_index], bboxs, lbs_segments);
@@ -972,7 +1001,7 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		labels.index_put_({ torch::indexing::Slice(), torch::tensor({1, 3})}, 
 			labels.index({ torch::indexing::Slice(), torch::tensor({1, 3})}) / img.cols
 			);		
-
+		
 		if(overlap)
 		{
 			torch::Tensor tmp_indices;
@@ -997,11 +1026,11 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 		*		nl = len(labels)  # update after albumentations
 		*/
 		// HSV color-space
-		augment_hsv(img, std::get<float>(hyp["hsv_h"]),
-			std::get<float>(hyp["hsv_s"]),
-			std::get<float>(hyp["hsv_v"]));
-
-		if (random_uniform() < (std::get<float>(hyp["flipud"])))
+		augment_hsv(img, std::get<float>(args->at("hsv_h")),
+			std::get<float>(args->at("hsv_s")),
+			std::get<float>(args->at("hsv_v")));
+		
+		if (random_uniform() < (std::get<float>(args->at("flipud"))))
 		{
 			cv::flip(img, img, 0);
 			labels.index_put_({ torch::indexing::Slice(), 2 },
@@ -1012,7 +1041,7 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 				cv::flip(cv_masks[mat_idx], cv_masks[mat_idx], 0);
 			}
 		}
-		if (random_uniform() < (std::get<float>(hyp["fliplr"])))
+		if (random_uniform() < (std::get<float>(args->at("fliplr"))))
 		{
 			cv::flip(img, img, 1);
 			labels.index_put_({ torch::indexing::Slice(), 1 },
@@ -1081,7 +1110,8 @@ CustomExample LoadImagesAndLabels::get_segment(size_t index)
 	ret.target = labels_out.clone();
 	ret.mask = masks.clone();
 	ret.path = paths;
-	ret.shape = shapes;
+	ret.ori_shape = ori_shape;
+	ret.resized_shape = resized_shape;
 	return ret;
 };
 
@@ -1205,57 +1235,97 @@ std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>>
 
 	auto [aug_img4, aug_labels, aug_segment] = random_perspective(img4, labels4, 
 			segments4,
-			int(std::get<float>(hyp["degrees"])), std::get<float>(hyp["translate"]),
-			std::get<float>(hyp["scale"]), int(std::get<float>(hyp["shear"])),
-			std::get<float>(hyp["perspective"]), mosaic_border);
+			int(std::get<float>(args->at("degrees"))), std::get<float>(args->at("translate")),
+			std::get<float>(args->at("scale")), int(std::get<float>(args->at("shear"))),
+			std::get<float>(args->at("perspective")), mosaic_border);
 
 	return std::make_tuple(aug_img4, aug_labels, aug_segment);
 }
 
-
 std::tuple<Dataloader_Custom, int> create_dataloader(
 						const std::string& path,
-                        int imgsz,
-						int nc,
-                        int batch_size,
+						VariantConfigs args,
                         int stride,
-                        VariantConfigs& opt,
-                        VariantConfigs& hyp,
-                        bool augment,
-                        float pad, 
 						bool is_val,
-						bool is_segment,
-						bool is_overlap,
-						int downsample_ratio)
+						bool is_segment)
 {
-	int gs = stride;
-	bool rect = is_val ? true : std::get<bool>(opt["rect"]);
-	bool quad = std::get<bool>(opt["quad"]);
-	bool single_cls = nc == 1 || std::get<bool>(opt["single_cls"]);	
-	auto datasets = LoadImagesAndLabels(path, 
-										hyp,											
-										imgsz, 
-										augment, 
-										rect, 
-										single_cls, 
-										gs, 
-										pad,
-										is_segment,
-										is_overlap, 
-										downsample_ratio).map(CustomCollate());
-    int num_images = *(datasets.size());
 
-	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(opt["workers"]));
-#if 1	
+	auto datasets = LoadImagesAndLabels(path, 
+										&args,											
+										stride, 
+										is_segment 
+										).map(YoloCustomCollate());
+
+	int num_images = datasets.dataset().size().value_or(0);
+	std::cout << "create dataloader num_iamges: " << num_images << "\n";
+
+	int batch_size = std::get<int>(args.at("batch"));
+	std::cout << "batch size: " << batch_size << "\n";
+		if(is_val)	batch_size *=2;
+	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(args.at("workers")));
 	Dataloader_Custom dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
                 std::move(datasets), dataloader_options);
+
 	return std::make_tuple(std::move(dataloader), num_images);
-#else
-	torch::data::samplers::SequentialSampler sampler(num_images);
-	//torch::data::samplers::RandomSampler sampler(num_images);
-	Dataloader_Custom dataloader = std::make_shared<Dataloader_CutomeType>(std::move(datasets), std::move(sampler), dataloader_options);
-	return {dataloader, num_images};
-#endif	
 }
 
+DataloaderBase::DataloaderBase(const std::string& root_path, VariantConfigs& _args_input, int stride, 
+	bool _is_val, bool is_segment) : args(_args_input), is_val(_is_val)
+{
+	total_numbers = 0;
+	auto data_filepath = std::filesystem::path(root_path).append(std::get<std::string>(args["data"]));
+	data_yaml_path = data_filepath.string();
+	if(!std::filesystem::exists(std::filesystem::path(data_filepath)))
+	{	
+		LOG(ERROR) << "datasets yaml file: " << data_yaml_path << " not exists.";
+		exit(-1);
+	}
+	if (!parse_data_yaml(root_path))
+	{
+		LOG(ERROR) << "dataset path file: " << datasets_path << " not exists.";
+	}
 
+	check_batchsize(args);
+	args["mode"] = is_val ? "val" : "train";	// 后续LoadImagesAndLabels初始化时要用这个值
+
+	auto datasets = LoadImagesAndLabels(datasets_path, &args, stride, is_segment).map(YoloCustomCollate());
+	total_numbers = datasets.size().value_or(0);
+	if (total_numbers == 0) LOG(WARNING) << "datasets size == 0, check you datasets or sets.";
+
+	batch_size = std::get<int>(args["batch"]);
+	if (is_val)	batch_size *= 2;
+	
+	auto dataloader_options = torch::data::DataLoaderOptions().batch_size(batch_size).workers(std::get<int>(args.at("workers")));
+
+	dataloader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+		std::move(datasets), dataloader_options);
+}
+
+void DataloaderBase::cloase_mosaic(bool bclose)
+{
+	if (bclose)
+	{
+		//std::cout << "close mosaic" << std::endl;
+		args["mosaic"] = 0.f;
+	}
+	else
+	{
+		// args["augment"] = true;
+		// args["rect"] = false;
+		//std::cout << "open mosaic" << std::endl;
+		args["mosaic"] = 1.f;
+	}
+}
+
+bool DataloaderBase::parse_data_yaml(const std::string& root)
+{
+	std::string train_path;
+	std::string val_path;
+	read_data_yaml(data_yaml_path, train_path, val_path, names);
+	datasets_path = is_val ? val_path : train_path;
+	std::cout << "dataset filepath: " << datasets_path << " root: " << root << "\n";
+	auto tmp_path = std::filesystem::path(root).append(datasets_path);
+	datasets_path = tmp_path.string();
+
+	return true;
+}

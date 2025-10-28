@@ -4,15 +4,14 @@
 #include <math.h>
 #include <filesystem>
 
-Singleton_PlotBatchImages::Singleton_PlotBatchImages(const std::string& dir, const std::string& prefix)
+Singleton_PlotBatchImages::Singleton_PlotBatchImages(const std::string& dir)
 {
     save_dir = dir;
-    prefix_name = prefix;
     std::thread plot_imgs_targets_thread(&Singleton_PlotBatchImages::pop_data, this);
     plot_imgs_targets_thread.detach();
 }
 
-void Singleton_PlotBatchImages::push_data(torch::Tensor imgs, torch::Tensor targets)
+void Singleton_PlotBatchImages::push_data(torch::Tensor imgs, torch::Tensor targets, std::string prefix, int idx)
 {
     auto img_cpu = imgs.clone();
     img_cpu = img_cpu.to(torch::kCPU);
@@ -21,7 +20,7 @@ void Singleton_PlotBatchImages::push_data(torch::Tensor imgs, torch::Tensor targ
 
     std::unique_lock<std::mutex> lock(mtx_queue);
     cv.wait(lock, [&](){return this->queue_can_push(); });
-    data_queue.push({imgs, targets});
+    data_queue.push({imgs, targets, prefix, idx});
 
     cv.notify_all();
 }
@@ -29,15 +28,17 @@ void Singleton_PlotBatchImages::push_data(torch::Tensor imgs, torch::Tensor targ
 void Singleton_PlotBatchImages::pop_data()
 {
     torch::Tensor imgs, targets;
+    std::string prefix;
+    int idx;
     while(false == b_exit_flag)
     {
         if(this->queue_have_data())
         {
             std::unique_lock<std::mutex> lock(mtx_queue);
             cv.wait(lock, [&]() {return this->queue_have_data(); });
-            std::tie(imgs, targets) = this->data_queue.front();
+            std::tie(imgs, targets, prefix, idx) = this->data_queue.front();
             data_queue.pop();
-            plot_one_batchs(imgs, targets);
+            plot_one_batchs(imgs, targets, prefix, idx);
         }
         else
         {
@@ -46,12 +47,11 @@ void Singleton_PlotBatchImages::pop_data()
     }
 }
 
-void Singleton_PlotBatchImages::plot_one_batchs(torch::Tensor imgs, torch::Tensor targets)
+void Singleton_PlotBatchImages::plot_one_batchs(torch::Tensor imgs, torch::Tensor targets, std::string prefix_name, int idx)
 {
     bool normalise = imgs.max().item().toFloat() <= 1.0;
-    std::string fname = prefix_name + "_" + std::to_string(incremental_counter) + ".jpg";
+    std::string fname = prefix_name + "_" + std::to_string(idx) + ".jpg";
     plot_images(imgs, targets, save_dir, fname, normalise);
-    incremental_counter++;
 }
 
 cv::Mat convert_tensor_to_mat(torch::Tensor img, 

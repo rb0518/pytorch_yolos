@@ -3,6 +3,7 @@
 #include <torch/torch.h>
 
 #include "yolo.h"
+#include "torch_utils.h"
 /*
 def test(data,
          weights=None,
@@ -30,7 +31,7 @@ def test(data,
 #include "datasets.h"
 
 Dataloader_Custom test(
-    std::shared_ptr<Model> model,   // model or nullpytr
+    std::shared_ptr<ModelImpl> model,   // model or nullpytr
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
@@ -46,3 +47,52 @@ Dataloader_Custom test(
     float iou_thres = 0.6f,
     bool save_pred = false
 );
+
+class BaseValidator
+{
+public:
+    BaseValidator(std::shared_ptr<Model> _model_ptr,
+        VariantConfigs _args_input, std::string _root_dir);
+
+    void setup_model();
+
+    void init_device();
+    void init_dirs();
+
+    void load_weight();
+
+    void init_dataloader();
+
+    void do_validate();
+protected:
+    YoloCustomExample preprocess(YoloCustomExample& batch);
+    std::vector<torch::Dict<std::string, torch::Tensor>> postprocess(torch::Tensor preds);
+
+    void update_metrics(std::vector<torch::Dict<std::string, torch::Tensor>> preds,
+        torch::Dict<std::string, torch::Tensor> batch);
+
+    void _model_eval();
+
+    torch::Dict<std::string, torch::Tensor> _prepare_batch(int si,
+        torch::Dict<std::string, torch::Tensor> batch);
+
+    torch::Dict<std::string, torch::Tensor> _prepare_pred(
+        torch::Dict<std::string, torch::Tensor> pred);
+public:
+    std::shared_ptr<Model> model_ptr = { nullptr };
+    bool is_training = false;
+
+    std::string root_dir;
+    VariantConfigs args;
+    std::string task_name;
+
+    torch::Device device = torch::Device(torch::kCPU);
+
+    std::string save_dir;
+    int nc = 80;
+    int imgsz = 640;
+
+    DataloaderBase* val_loader;
+
+    int seen;
+};

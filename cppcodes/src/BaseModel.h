@@ -26,7 +26,7 @@ public:
 
 // args 根据is_num决定是用n or s 
 // s: 要根据情况决定，包含了None True False nearest nc, anchors等
-using arg_complex = std::variant<int, std::string, bool>;
+using arg_complex = std::variant<int, std::string, bool, float>;
 
 class BaseModule : public torch::nn::Module, std::enable_shared_from_this<BaseModule>
 {

@@ -375,6 +375,9 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
 void init_torch_seek(int seed/* = 0*/)
 {
     torch::manual_seed(seed);
+    torch::cuda::manual_seed(seed);
+    if (torch::cuda::device_count() > 1)
+        torch::cuda::manual_seed_all(seed);
 
     if (seed == 0)
     {
@@ -397,6 +400,8 @@ void init_torch_seek(int seed/* = 0*/)
             LOG(WARNING) << "torch::cuda::cudnn_is_available: false";
     }
 }
+
+
 
 // 进程组ProcessGroup核心实现
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
@@ -453,3 +458,204 @@ float random_uniform(float start/* = 0.0f*/, float end/* = 1.0f*/)
 	return dis(gen);
 }
 
+std::tuple<bool, int, std::string, std::string> parse_yolo_config(const std::string& filename) 
+{
+    // 默认值设置
+    int version_num;
+    std::string size_type = "n";
+    std::string task_type = "";
+
+    // 正则表达式模式（支持yolov(n)('n/l/m/x'){-seg/obb/pose/cls}.yaml格式）
+    std::regex pattern(R"(^yolo([v])?(\d+)([nlsmx])?(?:-(\w+))?\.yaml$)");
+    std::smatch matches;
+    bool is_valid = false;
+
+    if (std::regex_match(filename, matches, pattern)) 
+    {
+        // for (int i = 0; i < matches.size(); i++)
+        // {
+        //     std::cout << " matches[" << i << "] " << matches[i].str() << "\n";
+        // }
+
+        is_valid = true;
+        // version_num = matches[1].matched ? std::stoi(matches[1].str()) : 12;
+        if (matches[2].matched) { // 必须带版本号
+            version_num = std::stoi(matches[2].str());
+        } else {
+            is_valid = false;
+            LOG(ERROR) << "filename not have yolo version: " << filename;
+            return std::make_tuple(is_valid, version_num, size_type, task_type);
+        }    
+
+        size_type = matches[3].matched ? matches[2].str() : "";
+        task_type = matches[4].matched ? matches[3].str() : "";
+    }
+
+    return std::make_tuple(is_valid, version_num, size_type, task_type);
+}
+
+namespace ops {
+std::vector<torch::Tensor> non_max_suppression(
+    torch::Tensor prediction,
+    float conf_thres/* = 0.25f*/,
+    float iou_thres/* = 0.45f*/,
+    std::vector<int> classes/* = {}*/,
+    bool agnostic/* = false*/,
+    bool multi_label/* = false*/,
+    std::vector<int>/* = {}*/, // 暂时未用，用std::vector<int>代替
+    int max_det/* = 300*/,
+    int nc/* = 0*/,
+    float max_time_img/* = 0.05f*/,
+    int max_nms/* = 30000*/,
+    int max_wh/* = 7680*/,
+    bool in_place/* = true*/,
+    bool rotated /*= false*/)
+{
+    std::cout << "non_max_suppressio startm, input: " << prediction.sizes() << std::endl;
+
+    if (prediction.size(-1) == 6)
+    {
+        std::cout << "prediction size(-1) == 6, it's end2ent model i.e. [1,300, 6] \n";
+        std::cout << ColorString("ERROR: ", "R") << "not support now.\n";
+        exit(-1);
+    }
+
+    int bs = prediction.size(0);    // batch size
+    if (nc == 0) nc = prediction.size(1) - 4;
+    int nm = prediction.size(1) - nc - 4;   // number of masks
+    int mi = 4 + nc;    // mask start index
+
+    auto xc = prediction.index({ torch::indexing::Slice(), torch::indexing::Slice(4, mi) }).amax(1) > conf_thres; // condidates
+    std::cout << "xc " << xc.sizes() << std::endl;      // [bs, 8400]
+    float time_limit = 2.0 + max_time_img * bs; // seconds to quit after
+    multi_label &= nc > 1;
+    prediction = prediction.transpose(-1, -2);
+    std::cout << "pred transpose: " << prediction.sizes() << "\n";
+
+    if(!rotated)
+    { 
+        if (in_place)
+        {
+            auto pred_bbox_xyxy = xywh2xyxy(prediction.index(
+                { "...", torch::indexing::Slice(0, 4) }));
+            std::cout << "in_place pred_bbox_xyxy: " << pred_bbox_xyxy.sizes() << std::endl;
+            prediction.index_put_({ "...", torch::indexing::Slice(0,4)},
+                pred_bbox_xyxy);
+        }
+        else
+        { 
+            auto xyxy_1 = xywh2xyxy(prediction.index({ "...",
+                torch::indexing::Slice(0, 4) }));
+            prediction = torch::cat({ xyxy_1,
+                prediction.index({"...", torch::indexing::Slice(4, torch::indexing::None)}) }
+                , - 1);
+        }
+    }
+
+    std::vector<torch::Tensor> output;
+    for (int i = 0; i < bs; i++)
+        output.emplace_back(torch::zeros({ 0, 6 + nm },
+            torch::TensorOptions().device(prediction.device())));
+
+    for (size_t xi = 0; xi < prediction.size(0); ++xi)
+    {
+        auto x = prediction[xi];
+        x = x.index({ xc[xi] });
+        if (x.size(0) == 0)
+        {
+            std::cout << xi << " after x[xc[xi]] return 0 " << std::endl;
+            continue;
+        }
+
+        auto xyxy_cls_mask = x.split({ 4, nc, nm }, 1);
+        auto box = xyxy_cls_mask[0];
+        auto cls = xyxy_cls_mask[1];
+        auto mask = xyxy_cls_mask[2];
+        std::cout << "cls " << cls.sizes() << " box " << box.sizes()
+            << " mask " << mask.sizes() << std::endl;
+        if (multi_label)
+        {
+            auto cls_where = torch::where(cls > conf_thres);
+            auto i = cls_where[0];
+            auto j = cls_where[1];
+            std::cout << "i " << i.sizes() << " j " << j.sizes() << std::endl;
+            auto box_i = box.index({ i });
+            auto x_ij = x.index({ i, 4 + j, torch::indexing::None });
+            auto mask_i = mask.index({ i });
+            auto j_float = j.index({torch::indexing::Slice(), 
+                torch::indexing::None});
+            j_float = j_float.to(torch::kFloat);
+            x = torch::cat({ box_i, x_ij, j_float, mask_i }, 1);
+        }
+        else
+        {
+            auto [conf, j] = cls.max(1, true);
+            x = torch::cat({ box, conf, j.to(torch::kFloat), mask }, 1).index(
+                {conf.view(-1)> conf_thres});
+        }
+
+        if (classes.size())
+        {
+            // not complete code
+        }
+
+        int n = x.size(0);   // number of boxes
+        std::cout << "number of boxes: " << n << std::endl;
+
+        if (n > max_nms) 
+        { 
+            // 获取第4列（置信度）并按降序排序，取前max_nms个索引
+            auto x_argsort = x.index({torch::indexing::Slice(), 4 }).argsort(-1, true);
+            x_argsort = x_argsort.index({ torch::indexing::Slice(0, max_nms) });
+            x = x.index({ x_argsort });
+        }
+
+        torch::Tensor c;
+        if (agnostic)
+            c = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, 6) }) * 0;
+
+        else
+            c = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, 6) }) * max_wh;
+        auto scores = x.index({ torch::indexing::Slice(), 4 });
+        std::vector<int> nms_indices;
+        if (rotated)
+        {
+            std::cout << "rotated not support now. \n";
+
+        }
+        else
+        {
+            auto boxes = x.index({ torch::indexing::Slice(), torch::indexing::Slice(
+                0, 4) }).add(c);
+
+            std::vector<cv::Rect> cv_boxes;
+            std::vector<float> cv_scores;
+            for (int i = 0; i < boxes.size(0); i++)
+            {
+                auto x1 = boxes[i][0].item().toDouble();
+                auto y1 = boxes[i][1].item().toDouble();
+                auto x2 = boxes[i][2].item().toDouble();
+                auto y2 = boxes[i][3].item().toDouble();
+
+                cv_boxes.push_back(cv::Rect(cv::Point2d(x1, y1), cv::Point2d(x2, y2)));
+                cv_scores.push_back(scores[i].item().toFloat());
+            }
+
+            // run cv::dnn::NMSBoxes
+#if 0
+            std::vector<float> updated_scores;
+            cv::dnn::softNMSBoxes(cv_boxes, cv_scores, updated_scores, conf_thres, iou_thres, nms_indices);
+#else
+            cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres, iou_thres, nms_indices);
+#endif   
+            if (nms_indices.size() > max_det) {
+                nms_indices.resize(max_det);
+            }
+        }
+        output[xi] = x.index({ torch::tensor(nms_indices) });
+    }
+
+    return output;
+}
+
+}   // end namespace ops

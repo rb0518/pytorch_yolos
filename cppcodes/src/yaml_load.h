@@ -14,11 +14,6 @@
 #include "BaseModel.h"
 
 // 判定指定名字是否在指定的
-inline bool check_str_in_strs(const std::vector<std::string> names, const std::string& name){
-    return std::count(names.begin(), 
-                        names.end(), name);
-}
-
 std::tuple<float, bool> ConvertToNumber(const std::string& str);
 // Yolo layer define [from number name args]
 
@@ -35,7 +30,10 @@ typedef struct tagYoloLayerDef
         arg_complex tmp;
         if(r_b) // 是可以转换为数字
         {
-            tmp = int(numb);
+            if (s.find('.') == std::string::npos)
+                tmp = int(numb);
+            else
+                tmp = float(numb);
         }
         else
         {
@@ -126,3 +124,18 @@ void show_cfg_info(const std::string& title, const VariantConfigs& cfgs);
 
 void read_data_yaml(const std::string& data_file, std::string& train_path, std::string& val_path, 
                 std::vector<std::string>& names);
+
+inline bool check_str_in_strs(const std::vector<std::string> names, const std::string& name){
+    return std::count(names.begin(), 
+                        names.end(), name);
+}                
+
+inline std::string findSubstringInStrings(const std::string& mainStr,
+    const std::vector<std::string>& substrings) {
+    for (const auto& sub : substrings) {
+        if (mainStr.find(sub) != std::string::npos) {
+            return sub;
+        }
+    }
+    return "";
+}

@@ -51,9 +51,9 @@ torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, 
 
 
 Dataloader_Custom test(
-    std::shared_ptr<Model> model,   // model or nullpytr
+    std::shared_ptr<ModelImpl> model,   // model or nullpytr
     std::string root_,          
-    VariantConfigs opt,             // opt 
+    VariantConfigs args,             // default.yaml 
     std::vector<std::string> cls_names,
     Dataloader_Custom val_dataloader, // if not val, set = nullptr
     int val_total_number,
@@ -71,11 +71,11 @@ Dataloader_Custom test(
     bool is_training = model != nullptr ? true : false;
     auto device = torch::cuda::is_available() ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
     ModelImpl* model_ptr;
-    std::shared_ptr<Model> model_tmp; 
+    std::shared_ptr<ModelImpl> model_tmp; 
     std::string save_dir = save_dir_;
     if(is_training)
     {
-        model_ptr = model->get();
+        model_ptr = model.get();
         device = model_ptr->parameters().begin()->device();
 
         //if (device.type() == torch::kCPU)
@@ -87,13 +87,13 @@ Dataloader_Custom test(
         if(false == std::filesystem::exists(std::filesystem::path(save_dir)))
         {
             std::string strtmp = std::filesystem::path(root_)
-                        .append(std::get<std::string>(opt["project"]))
-                        .append(std::get<std::string>(opt["name"])).string();
+                        .append(std::get<std::string>(args["project"]))
+                        .append(std::get<std::string>(args["name"])).string();
             save_dir = increment_path(strtmp);
         }
         std::cout << "save dir: " << save_dir << std::endl;
 
-        auto cfg_file = std::filesystem::path(root_).append(std::get<std::string>(opt["cfg"])).string();
+        auto cfg_file = std::filesystem::path(root_).append(std::get<std::string>(args["model"])).string();
         std::cout << "cfg_file: " << cfg_file << std::endl;
         if(false == std::filesystem::exists(std::filesystem::path(cfg_file)))
         {
@@ -106,8 +106,8 @@ Dataloader_Custom test(
             LOG(ERROR) << "weights file: " << weights << " not exist." ;
             return nullptr;
         }
-        model_tmp = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, false);
-        model_ptr = model_tmp->get();
+        model_tmp = std::make_shared<ModelImpl>(cfg_file, nc, imgsz, imgsz, 3, false);
+        model_ptr = model_tmp.get();
         torch::serialize::InputArchive ckpt_in;
         ckpt_in.load_from(weights_file); // model optim epoch
         torch::serialize::InputArchive model_in;
@@ -134,15 +134,9 @@ Dataloader_Custom test(
     
     if(val_dataloader == nullptr)
     {
-        bool augment = false;
-        bool rect = true;
-        int gs = 32;
-        float pad = 0.5f;
         std::cout << "val path: " << val_path << std::endl;
-        VariantConfigs hyp = set_cfg_hyp_default();
-        std::tie(val_dataloader, num_images) = create_dataloader(val_path,
-                                                                imgsz, nc, batch_size, gs,
-                                                                opt, hyp, augment, pad, true, is_segment);  // default follow: false, 4
+        std::tie(val_dataloader, num_images) = create_dataloader(val_path, args,
+                                                                32, true, is_segment);  // default follow: false, 4
     }
     else{
         num_images = val_total_number;
@@ -162,15 +156,21 @@ Dataloader_Custom test(
     progressbar pbar(num_images/batch_size, 36);
     for (auto batch : *val_dataloader)
     {
-        auto img = batch.data;
-        auto targets = batch.target;
+        auto img = batch.at("img");
+        auto bboxes = batch.at("bboxes");
+        auto clses = batch.at("cls");
+        auto batch_idx = batch.at("batch_idx");
 
-        img = img.to(device).to(torch::kFloat);
-        img = img / 255.f;
-        targets = targets.to(device);
-        auto masks = batch.mask;
-        masks = masks.to(torch::kFloat);
-        masks = masks.to(device);
+        auto targets = torch::zeros({bboxes.size(0), 6}, 
+            bboxes.options());
+
+        targets.index_put_({"...", 0}, batch_idx);
+        targets.index_put_({"...", 1}, clses);
+        targets.index_put_({"...", torch::indexing::Slice(2, torch::indexing::None)},
+                bboxes);
+        torch::Tensor masks;
+        if(batch.contains("mask"))
+            masks = batch.at("mask");
 
         int nb = img.size(0);
         int height = img.size(2);
@@ -370,3 +370,308 @@ Dataloader_Custom test(
     return std::move(val_dataloader);
 }
 
+BaseValidator::BaseValidator(std::shared_ptr<Model> _model_ptr, VariantConfigs _args_input, std::string _root_dir)
+    : model_ptr(_model_ptr), args(_args_input), root_dir(_root_dir)
+{
+    is_training = model_ptr != nullptr; // 未传入trainer中的model，则说明是要直接重新生成个model来验证
+
+    setup_model();
+    load_weight();
+
+    init_device();
+    init_dirs();
+
+    init_dataloader();
+}
+
+void BaseValidator::init_dirs()
+{
+    auto get_task_suffix = [](const std::string& task_name, std::string& project) {
+        if (task_name == "detect") { // do nothing
+        }
+        else if (task_name == "segment")
+            project = project + "_seg";
+        else if (task_name == "pose")
+            project = project + "_pose";
+        else if (task_name == "obb")
+            project = project + "_obb";
+        else if (task_name == "classify")
+            project = project + "_class";
+        else
+            LOG(WARNING) << "you input task " << task_name << "not support.";
+        };
+
+    task_name = std::get<std::string>(args["task"]);
+    if (is_training)
+    {   // 如果是训练中验证，沿用save_dir
+        save_dir = std::filesystem::path(root_dir).append(std::get<std::string>(args["save_dir"])).string();
+    }
+    else
+    {
+        std::string project = std::get<std::string>(args["project"]);
+        if (project == "")
+        {
+            LOG(WARNING) << "please input project name use --project. use default runs/train";
+            project = "runs/train";
+            get_task_suffix(task_name, project);
+        }
+        std::string name = std::get<std::string>(args["name"]);
+        if (name == "")
+        {
+            LOG(WARNING) << "please input project name use --name. use default runs/train";
+            name = "exp";
+        }
+        auto save_dir_path = std::filesystem::path(root_dir).append(project).append(name);
+        if (std::filesystem::exists(save_dir_path))
+        {
+            if (std::get<bool>(args["exist_ok"]))
+            {
+
+                args["project"] = project;
+                args["name"] = name;
+                args["save_dir"] = save_dir_path.string();
+            }
+            else
+            {
+                auto prj_and_name = increment_path(save_dir_path.string(), false);
+                name = std::filesystem::path(prj_and_name).filename().string();
+                args["project"] = project;
+                args["name"] = name;
+                args["save_dir"] = prj_and_name;
+            }
+        }
+        else
+        {
+            args["project"] = project;
+            args["name"] = name;
+            args["save_dir"] = save_dir_path.string();
+        }
+        save_dir = std::get<std::string>(args["save_dir"]);
+    }
+}
+
+void BaseValidator::load_weight()
+{
+    if (is_training) 
+        return;
+
+    std::string weights_set = std::get<std::string>(args["weights"]);
+    std::string weights_file = std::filesystem::path(root_dir).append(weights_set).string();
+    if (false == std::filesystem::exists(weights_file))
+    {
+        LOG(ERROR) << "weights file: " << weights_set << " not exist.";
+        return;
+    }
+    torch::serialize::InputArchive ckpt_in;
+    ckpt_in.load_from(weights_file); // model optim epoch
+    torch::serialize::InputArchive model_in;
+    if (ckpt_in.try_read("model", model_in))
+    {
+        model_ptr->ptr()->load(model_in);
+        std::cout << "load " << weights_file << " over..." << std::endl;
+    }
+    else
+        LOG(ERROR) << "*** Load weight error! ";
+}
+
+void BaseValidator::setup_model()
+{
+    if (false == is_training)
+    {
+        auto tmp_path = std::filesystem::path(root_dir).append(std::get<std::string>(args["model"]));
+        if (!std::filesystem::exists(tmp_path))
+        {
+            std::cout << ColorString("ERROR: ", "R") << "model yaml file not exists: " << tmp_path.string() << std::endl;
+            return;
+        }
+        
+        auto cfg_file = tmp_path.string();
+        imgsz = std::get<int>(args["imgsz"]);
+        YAML::Node cfgs = YAML::LoadFile(cfg_file);
+        nc = cfgs["nc"].as<int>();
+        model_ptr = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3);
+        if (model_ptr == nullptr)
+        {
+            LOG(ERROR) << "model init error.\n";
+        }
+    }
+}
+
+void BaseValidator::init_device()
+{
+    if (is_training)
+    {
+        device = model_ptr->get()->parameters().begin()->device();
+        return;
+    }
+
+    std::cout << "input device type: " << std::get<std::string>(args["device"]) << "\n";
+    device = get_device(std::get<std::string>(args["device"]));
+    std::cout << ColorString("Device: ") << device.type() << std::endl;
+}
+
+void BaseValidator::init_dataloader()
+{
+    if (task_name == "segment")
+        val_loader = new DataloaderBase(root_dir, args, 32, true, true);
+    else
+        val_loader = new DataloaderBase(root_dir, args, 32, true, false);
+}
+
+YoloCustomExample BaseValidator::preprocess(YoloCustomExample& batch)
+{
+    bool non_blocking = this->device.type() == c10::DeviceType::CUDA;
+    
+    for (auto& item : batch)
+    {
+        batch.at(item.key()) = item.value().to(this->device, non_blocking);
+    }
+    batch.at("img") = batch.at("img").to(torch::kFloat) / 255.f;
+
+    return batch;
+}
+
+std::vector<torch::Dict<std::string, torch::Tensor>> BaseValidator::postprocess(torch::Tensor preds)
+{
+    std::string tmp = std::get<std::string>(args["conf"]);
+    float conf = 0.25f;
+    if(tmp != "")
+        conf = std::get<float>(args["conf"]);
+
+    auto outputs = ops::non_max_suppression(
+        preds,
+        conf,
+        std::get<float>(args["iou"]),
+        {},
+        (std::get<bool>(args["single_cls"]) || std::get<bool>(args["agnostic_nms"])),
+        this->nc > 1,
+        {},
+        std::get<int>(args["max_det"])
+        );
+
+    std::vector<torch::Dict<std::string, torch::Tensor>> rets;
+    for (int i = 0; i < outputs.size(); i++)
+    {
+        torch::Dict<std::string, torch::Tensor> one_pred_out;
+
+        torch::Tensor out = outputs[i];
+        int size_1 = out.size(1);
+
+        auto out_split = out.split({ 4, 1, 1, size_1 - 6 }, 1);
+        std::cout << "out_split size: " << out_split.size() << " " << out_split[0].sizes() << std::endl;
+        one_pred_out.insert("bboxes", out_split[0]);
+        one_pred_out.insert("conf", out_split[1]);
+        one_pred_out.insert("cls", out_split[2]);
+        one_pred_out.insert("extra", out_split[3]);
+
+        rets.push_back(one_pred_out);
+    }
+
+    return rets;
+}
+
+void BaseValidator::update_metrics(std::vector<torch::Dict<std::string, torch::Tensor>> preds,
+    torch::Dict<std::string, torch::Tensor> batch)
+{
+    int batch_count = preds.size();
+    for (int si = 0; si < batch_count; si++)
+    {
+        this->seen += 1;
+
+        auto pbatch = this->_prepare_batch(si, batch);
+        auto predn = this->_prepare_pred(preds[si]);
+    }
+}
+
+
+void BaseValidator::do_validate()
+{
+    _model_eval();
+
+    int nb = val_loader->get_total_samples(true);
+    
+    progressbar pbar(nb, 30);
+    pbar.set_done_char(std::string("█"));
+    int idx_epoch = 0;
+    this->seen = 0;
+    for (auto batch : *(val_loader->dataloader))
+    {
+        if (idx_epoch < 3)
+        {
+            // save_batch_sample_image(batch, idx_epoch);
+        }
+        auto prepro_batch = preprocess(batch);
+        int num_targets = prepro_batch.at("bboxes").size(0);
+
+        // 1 Inference
+        auto [pred_t, train_v, mask_t] = model_ptr->get()->forward(prepro_batch.at("img"));
+
+        // 2 Loss 暂时未修改，后续要将v8DetectionLoss集成到model中，并添加loss函数
+
+        // 3 Postprocess
+        auto preds = postprocess(pred_t);
+
+        // 4 update_metrics(preds, prepro_batch)
+
+
+        if (std::get<bool>(args["plots"]) && idx_epoch < 3)
+        {
+
+        }
+
+
+        idx_epoch++;
+        pbar.update();
+    }
+}
+
+void BaseValidator::_model_eval()
+{
+    this->model_ptr->get()->eval();
+}
+
+/*
+    """
+    Prepare a batch of images and annotations for validation.
+
+    Args:
+        si (int): Batch index.
+        batch (dict[str, Any]): Batch data containing images and annotations.
+
+    Returns:
+        (dict[str, Any]): Prepared batch with processed annotations.
+    """
+*/
+torch::Dict<std::string, torch::Tensor> BaseValidator::_prepare_batch(int si, 
+    torch::Dict<std::string, torch::Tensor> batch)
+{
+    auto idx = batch.at("batch_idx") == si;
+    auto cls = batch.at("cls").index({ idx }).squeeze(-1);
+    auto bbox = batch.at("bboxes").index({ idx });
+    /*
+        ori_shape = batch["ori_shape"][si]
+        imgsz = batch["img"].shape[2:]
+        ratio_pad = batch["ratio_pad"][si]
+        batch和target中坐标都是包括偏移的，暂时不考虑
+    */
+
+    if (cls.size(0)) // 有标注
+    {
+        bbox = xywh2xyxy(bbox);
+        torch::Tensor scale = torch::tensor({ 640,640,640,640 },
+            torch::TensorOptions().device(this->device));
+        bbox = bbox * scale;
+    }
+    torch::Dict<std::string, torch::Tensor> ret;
+    ret.insert("cls", cls);
+    ret.insert("bboxes", bbox);
+    
+    return ret;        
+}
+
+torch::Dict<std::string, torch::Tensor> BaseValidator::_prepare_pred(torch::Dict<std::string, torch::Tensor> pred)
+{
+    // if(std::get<bool>(args["single_cls"])
+    //      pred.at("cls") = pred.at("cls") * 0;
+    return pred;
+}

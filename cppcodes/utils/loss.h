@@ -6,93 +6,123 @@
 #include "Yolo.h"
 #include "yaml_load.h"
 /*
-class FocalLossImpl : public torch::nn::Module {
-public:
-    FocalLossImpl(torch::nn::BCEWithLogitsLoss& loss_fcn,
-                 double gamma = 1.5, 
-                 double alpha = 0.25)
-        : gamma_(gamma),
-          alpha_(alpha) 
-    {
-        original_options_ = loss_fcn->options;
-        auto new_options = torch::nn::BCEWithLogitsLossOptions().weight(original_options_.weight())
-            .pos_weight(original_options_.pos_weight())
-            .reduction(torch::kNone);
-        auto device_ = loss_fcn->parameters().begin()->device();
-        loss_fcn_ = torch::nn::BCEWithLogitsLoss(new_options, device_);
-    }
-
-    torch::Tensor forward(torch::Tensor pred, torch::Tensor true_tensor) {
-        auto loss = loss_fcn_->forward(pred, true_tensor);
-        
-        // TensorFlow implementation style
-        auto pred_prob = torch::sigmoid(pred);  // prob from logits
-        auto p_t = true_tensor * pred_prob + (1 - true_tensor) * (1 - pred_prob);
-        auto alpha_factor = true_tensor * alpha_;
-        
-        // Calculate focal loss
-        auto modulating_factor = torch::pow(1.0 - p_t, gamma_);
-        loss = loss * alpha_factor * modulating_factor;
-        
-        // Apply original reduction
-        auto reduction_type = original_options_.reduction();
-        if (reduction_type.index() == torch::Reduction::Mean)
-        {
-            return loss.mean();
-        } 
-        else if (reduction_type.index() == torch::Reduction::Sum)
-        {
-            return loss.sum();
-        }
-        return loss;  // none reduction
-    }
-
-private:
-    torch::nn::BCEWithLogitsLoss loss_fcn_{nullptr};
-    double gamma_;
-    double alpha_;
-    torch::nn::BCEWithLogitsLossOptions original_options_;
-};
-TORCH_MODULE(FocalLoss);
+// 2025-10-17 Add V8DetectionLoss 
+    """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
 */
-class ComputeLoss// : public torch::nn::Module
+#include "head.h"
+#include "tal.h"
+/*
+    """
+    Return sum of left and right DFL losses.
+
+    Distribution Focal Loss (DFL) proposed in Generalized Focal Loss
+    https://ieeexplore.ieee.org/document/9792391
+    """
+*/
+class DFLossImpl : public torch::nn::Module
 {
 public:
-    bool sort_obj_iou = false;
+    DFLossImpl(int _reg_max) : reg_max(_reg_max)
+    {
+    }
 
-    ComputeLoss(std::shared_ptr<DetectImpl> m, VariantConfigs& _hyp, bool _autobalance = false, bool _overlap = false);
+    torch::Tensor forward(torch::Tensor pred_dist, torch::Tensor target)
+    {
+        target = target.clamp_(0, reg_max - 1.01f);
+        auto tl = target.to(torch::kLong);
+        auto tr = tl + 1;
+        auto wl = tr - target;
+        auto wr = 1 - wl;
+        
+        auto ce_1 = torch::nn::functional::cross_entropy(pred_dist, tl.view(-1),
+            torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone)).view(tl.sizes()) * wl;
 
-    std::tuple<torch::Tensor, torch::Tensor> operator()(const std::vector<torch::Tensor>& p, const torch::Tensor& proto,
-        torch::Tensor& targets, torch::Tensor& masks);
+        auto ce_2 = torch::nn::functional::cross_entropy(pred_dist, tr.view(-1),
+            torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone)).view(tl.sizes()) * wr;
+        return (ce_1 + ce_2).mean(-1, true);
+    }
+
+public:
+    int reg_max;
+};
+TORCH_MODULE(DFLoss);
+
+class BboxLossImpl : public torch::nn::Module
+{
+public:
+    BboxLossImpl(int reg_max) {
+        if (reg_max > 1)
+            dfl_loss = DFLoss(reg_max);
+    }
+
+    std::tuple<torch::Tensor, torch::Tensor>
+        forward(
+            torch::Tensor pred_dist,
+            torch::Tensor pred_bboxes,
+            torch::Tensor anchor_points,
+            torch::Tensor target_bboxes,
+            torch::Tensor target_scores,
+            float target_scores_sum,
+            torch::Tensor fg_mask)
+    { 
+        auto weight = target_scores.sum(-1).index({ fg_mask }).unsqueeze(-1);
+        //   iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        auto iou = bbox_iou(pred_bboxes.index({ fg_mask }), target_bboxes.index({ fg_mask }), false, false, false, true);
+        auto loss_iou = ((1.0f - iou) * weight).sum() / target_scores_sum;
+        /*
+                # DFL loss
+        if self.dfl_loss:
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
+            loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+            loss_dfl = loss_dfl.sum() / target_scores_sum
+        else:
+            loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+
+        return loss_iou, loss_dfl
+*/
+        torch::Tensor loss_dfl = torch::tensor(0.0).to(pred_dist.device());
+        if (dfl_loss)
+        {
+            auto target_ltrb = bbox2dist(anchor_points, target_bboxes, dfl_loss->reg_max - 1);
+            loss_dfl = dfl_loss->forward(pred_dist.index({ fg_mask }).view({ -1, dfl_loss->reg_max }),
+                target_ltrb.index({ fg_mask }));
+            loss_dfl *= weight;
+            loss_dfl = loss_dfl.sum() / target_scores_sum;
+        }
+
+        return { loss_iou, loss_dfl };
+    }
+public:
+    DFLoss dfl_loss{ nullptr };
+};
+TORCH_MODULE(BboxLoss);
+
+class v8DetectionLossImpl
+{
+public:
+    v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int tal_topk = 10);
+    std::tuple<torch::Tensor, torch::Tensor> forward(std::vector<torch::Tensor>& preds,
+         torch::Dict<std::string, torch::Tensor>& batch);
+public:
+    torch::Device device = torch::Device(torch::kCPU);
+    torch::nn::BCEWithLogitsLoss bce{ nullptr };
+    torch::Tensor stride;
+    int nc;
+    int no;
+    int reg_max;
+    bool use_dfl;
+    VariantConfigs hyp;
+
+    TaskAlignedAssigner assigner{ nullptr };
+    BboxLoss bbox_loss{ nullptr };
+    torch::Tensor proj;
 
 private:
-    torch::nn::BCEWithLogitsLoss BCEcls{nullptr}, BCEobj{nullptr};
-    ///FocalLoss FocalLoss_cls{nullptr}, FocalLoss_obj{nullptr};
-    double cp, cn, gr;
-    std::vector<double> balance;
-    int ssi;
-    int na;     // number of anchors
-    int nc;     // number of classes
-    int nl;     // number of layers
-    //torch::Tensor anchors;
-    torch::Device _device = torch::Device(torch::kCPU);
-    bool autobalance;
-    torch::Tensor strides;
+    torch::Tensor preprocess(torch::Tensor targets, int batch_size, torch::Tensor scale_tensor);
+    torch::Tensor bbox_decode(torch::Tensor anchor_points, torch::Tensor pred_dist);
 
-    bool overlap = false;
-    bool is_segment;
-    int nm;     // number of masks
-
-    std::tuple<std::vector<torch::Tensor>,
-        std::vector<torch::Tensor>,
-        std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>,
-        std::vector<torch::Tensor>,
-        std::vector<torch::Tensor>,
-        std::vector<torch::Tensor>>
-        build_targets(const std::vector<torch::Tensor>& p, 
-            torch::Tensor& targets); 
-
-    std::shared_ptr<DetectImpl> m_ptr;
-    VariantConfigs hyp;
 };
+TORCH_MODULE(v8DetectionLoss);
+
+
 

@@ -68,14 +68,12 @@ private:
     inline static std::mutex mtx;
     inline static std::mutex mtx_queue;
     bool b_exit_flag = false;
-    std::queue<std::tuple<torch::Tensor, torch::Tensor>> data_queue;
+    std::queue<std::tuple<torch::Tensor, torch::Tensor, std::string, int>> data_queue;
     std::condition_variable cv;
 
     std::string save_dir = ".";
-    std::string prefix_name = "train";
-    int incremental_counter = 0;
 
-    Singleton_PlotBatchImages(const std::string& dir, const std::string& prefix);
+    Singleton_PlotBatchImages(const std::string& dir);
     ~Singleton_PlotBatchImages(){
         b_exit_flag = true;
     }
@@ -84,26 +82,20 @@ public:
     Singleton_PlotBatchImages(const SingletonColors&) = delete;
     Singleton_PlotBatchImages& operator=(const Singleton_PlotBatchImages&) = delete;
 
-    static Singleton_PlotBatchImages* getInstance(std::string dir, std::string prefix) {
+    static Singleton_PlotBatchImages* getInstance(std::string dir) {
         std::lock_guard<std::mutex> lock(Singleton_PlotBatchImages::mtx);
         if (instance == nullptr)
-        {
-            instance = new Singleton_PlotBatchImages(dir, prefix);
-        }
+            instance = new Singleton_PlotBatchImages(dir);
         else
-        {
             instance->save_dir = dir;
-            instance->prefix_name = prefix;
-        }
         return instance;
     }
 
     bool queue_can_push(){return data_queue.size() < max_size;}
     bool queue_have_data(){return !data_queue.empty();}
-    void push_data(torch::Tensor imgs, torch::Tensor targets);
+    void push_data(torch::Tensor imgs, torch::Tensor targets, std::string prefix, int idx);
     void pop_data();
-    void plot_one_batchs(torch::Tensor imgs, torch::Tensor targets);
-    void reset_counter() { incremental_counter = 0; }
+    void plot_one_batchs(torch::Tensor imgs, torch::Tensor targets, std::string prefix, int idx);
 };
 
 // img [3, h, w] or [1, h, w]， 输入前自行处理

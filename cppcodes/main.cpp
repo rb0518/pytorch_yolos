@@ -19,11 +19,10 @@
 #include "utils/general.h"
 #include "plots.h"
 #include <regex>
-
 #include "train.h"
 #include "datasets.h"
-
 #include "progressbar.h"
+#include "SpecTest.h"
 
 // jit_weights如果设置了，就会先调用pretrain从torchscript,除了代码调试，默认应为""
 // 仿yolov5中代码，FLAGS_weights和FLAGS_jit_weights各取一
@@ -31,7 +30,7 @@ DEFINE_string(runtype,  "train",                "runtype: [train, predict, jit]"
 
 // 对应Yolov5-5.0代码
 DEFINE_string(weights,  "",                     "initial weight path");
-DEFINE_string(cfg,      "models/yolov5s.yaml",  "model.yaml path");
+DEFINE_string(cfg,      "models/11/yolo11.yaml",  "model.yaml path");
 DEFINE_string(data,     "data/coco128.yaml",    "data.yaml path");
 DEFINE_string(hyp,      "data/hyp.scratch.yaml","hyperparameters path");
 
@@ -39,8 +38,8 @@ DEFINE_int32(epochs,    300,                    "training epochs");
 DEFINE_int32(batch_size,16,                     "load data batch size");
 DEFINE_int32(img_size,  640,                    "image sizes");
 DEFINE_bool(rect,       false,                  "rectangular training");
-DEFINE_string(resume,   "",                     "resume most recent training");
-DEFINE_bool(nosave,     true,                   "only save final epoch");
+DEFINE_bool(resume,     false,                  "resume most recent training");
+DEFINE_bool(save,       true,                   "save train checkpoints and predict results");
 DEFINE_bool(notest,     true,                   "only test final epoch");
 
 DEFINE_bool(noautoanchor, true,                 "diable autoanchor check");
@@ -51,7 +50,7 @@ DEFINE_bool(image_weights, false,               "use weighted image selection fo
 DEFINE_string(device,   "gpu",                  "cpu gpu");
 DEFINE_bool(multi_scale,false,                  "vary img-size +/- 50%%");
 DEFINE_bool(single_cls, false,                  "train multi-class data as single-class");
-DEFINE_bool(adam,       false,                  "use torch.optim.Adam optimizer");
+DEFINE_string(optimizer,  "auto",               "(str) optimizer to use, choices=[SGD, Adam, Adamax, AdamW, NAdam, RAdam, RMSProp, auto]");
 DEFINE_bool(sync_bn,    false,                  "use SyncBatchNorm, only available in DDP mode");
 DEFINE_int32(local_rank,-1,                     "DDP parameter, do not modify");
 DEFINE_int32(workers,   8,                      "maximum number of dataloader workers");
@@ -72,6 +71,27 @@ DEFINE_bool(is_segment, false, "predict or jit runtype");
 // 约定script.pt是train export， torchscript.pt是eval导出
 DEFINE_string(jit_weights,  "", "path to pytorch pt file");             // load pytorch pretrained weights, must be script export
 
+void parse_args(VariantConfigs& args)
+{
+    args["weights"] = FLAGS_weights;
+    args["model"] = FLAGS_cfg;
+    args["data"] = FLAGS_data;
+    args["epochs"] = FLAGS_epochs;
+    args["batch"] = FLAGS_batch_size;
+    args["imgsz"] = FLAGS_img_size;
+    args["save"] = FLAGS_save;
+    args["save_period"] = FLAGS_save_period;
+    args["device"] = FLAGS_device;    
+    args["workers"] = FLAGS_workers;
+
+    args["project"] = FLAGS_project;
+    args["name"] = FLAGS_name;
+    args["exist_ok"] = FLAGS_exist_ok;
+    // 后续添加或者直接修改default.yaml
+
+    args["jit_weights"] = FLAGS_jit_weights;
+}
+
 int main(int argc, char* argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, false);
@@ -79,101 +99,64 @@ int main(int argc, char* argv[])
     FLAGS_alsologtostderr = true;
 
     std::string root_path = get_root_path_string();
-FLAGS_cfg = "models/segment/yolov5s-seg.yaml";
-FLAGS_data = "data/coco128-seg.yaml";   
-FLAGS_project ="runs/train_seg";
+    std::string default_yaml_file = std::filesystem::path(root_path).append("cfgs").append("default.yaml").string();
+    VariantConfigs args_default = load_cfg_yaml(default_yaml_file);
 
-    if(FLAGS_runtype=="train")
-    {
-        VariantConfigs opt = set_cfg_opt_default();
-        std::string ckpt = "";
-        if (FLAGS_resume != "")  // 将从指定的目录中恢复训练
+
+    auto set_model = [&](){
+        std::vector<std::string> runtype = {"train", "val", "predict"};
+        if(check_str_in_strs(runtype, FLAGS_runtype))
+            args_default["mode"] = FLAGS_runtype;
+        else{
+            LOG(WARNING) << FLAGS_runtype << " not support. will set default: train";
+            args_default["mode"] = "train";
+        }
+    };
+    
+    auto get_task = [&](){
+        auto [name_ok, version, scale, task] = parse_yolo_config(std::filesystem::path(FLAGS_cfg).filename().string());
+        if(name_ok)
         {
-            // if FLAGS_resume 设置的文件不存在，在默认的目录中去找最新的pt文件
-            if(std::filesystem::exists(std::filesystem::path(root_path).append(FLAGS_resume)))
+            if(version != 5 && version != 11 && version != 12)
             {
-                ckpt = std::filesystem::path(root_path).append(FLAGS_resume).string();
-            }
-            else{
-                std::string search_path = std::filesystem::path(root_path).append(std::get<std::string>(opt["project"])).string();
-                auto tmp_opt =  get_last_run(search_path);
-                if(tmp_opt != "")
-                    ckpt = tmp_opt;
-            }
-            
-            if(ckpt == ""){
-                LOG(ERROR) << "not set right, check resume settings";
+                LOG(ERROR) << "only complete support v5, v11, v12.";
                 exit(-1);
             }
-            
-            auto opt_yaml = std::filesystem::path(ckpt).parent_path().parent_path().append("opt.yaml").string();
-            std::cout << "Use last opt: " << opt_yaml << " " << std::filesystem::path(ckpt).parent_path().parent_path().string() << std::endl;
-            opt = load_cfg_yaml(opt_yaml);
-            //opt.cfg, opt.weights, opt.resume, opt.batch_size, opt.global_rank, opt.local_rank 
-            //      = '', ckpt, True, opt.total_batch_size, * apriori  # reinstate
-            //opt["cfg"] = ""; //依然采取从cfg中读取网络结构，再调入weights的方法，这里就不要去原目录中的cfg设置了
-            // 除以下参数外，其它参数全部沿用resume目录中的配置
-            opt["weights"] = std::filesystem::relative(std::filesystem::path(ckpt), std::filesystem::path(root_path)).string();
-            opt["resume"] = true;           // 将resume 设置为true
-            auto hypfilename = std::filesystem::path(ckpt).parent_path().parent_path().append("hyp.yaml");
-            opt["hyp"] = std::filesystem::relative(hypfilename, std::filesystem::path(root_path)).string();
-            if (std::get<std::string>(opt["data"]) != FLAGS_data)
-                opt["data"] = FLAGS_data;
-        }
-        else
-        {
-            // load opt from cfgs/opt.yaml
-            load_default_environment(root_path, opt);
 
-            opt["weights"] = FLAGS_weights;
-            opt["cfg"] = FLAGS_cfg;
-            opt["data"] = FLAGS_data;
-            opt["hyp"] = FLAGS_hyp;
-            opt["batch_size"] = FLAGS_batch_size;
-            opt["img_size"] = std::vector<int>({ FLAGS_img_size, FLAGS_img_size });
-            opt["rect"] = FLAGS_rect;
-            opt["nosave"] = FLAGS_nosave;
-            opt["notest"] = FLAGS_notest;
-            opt["noautoanchor"] = FLAGS_noautoanchor;
-            opt["evolve"] = FLAGS_evolve;
-            opt["device"] = FLAGS_device;
-            opt["adam"] = FLAGS_adam;
-            opt["workers"] = FLAGS_workers;
-            opt["project"] = FLAGS_project;
-            opt["name"] = FLAGS_name;
-            opt["exist_ok"] = FLAGS_exist_ok;
-            opt["quad"] = FLAGS_quad;
-            opt["linear_lr"] = FLAGS_linear_lr;
-            opt["label_smoothing"] = float(FLAGS_label_smoothing);
-            opt["save_period"] = FLAGS_save_period;
-            opt["total_batch_size"] = FLAGS_batch_size;
+            if(task == "")
+                task = "detect";
+            if(scale == "")
+                scale = "n";
+        }
+        else{
+            LOG(ERROR) << FLAGS_cfg << " not right, or we can't support you input file.";
+            exit(-1);
         }
 
-        opt["epochs"] = FLAGS_epochs;
-        std::string prj_and_name = std::get<std::string>(opt["project"]) + "/" + std::get<std::string>(opt["name"]);
-        auto search_path = std::filesystem::path(root_path).append(prj_and_name).string();
-        opt["exist_ok"] = FLAGS_exist_ok;
-        prj_and_name = increment_path(search_path, std::get<bool>(opt["exist_ok"]));
-        prj_and_name = std::filesystem::relative(std::filesystem::path(prj_and_name), std::filesystem::path(root_path)).string();
-        opt["save_dir"] = prj_and_name;
+        args_default["task"] = task;
+        args_default["cfg_scale"] = scale;               
+    };
 
+    auto check_pretrained = [&](){
+        bool fileexists = std::filesystem::exists(std::filesystem::path(root_path).append(FLAGS_weights));
+        if(FLAGS_weights=="" || !fileexists)
+            args_default["pretrained"] = false;
+    };
 
-        torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0)
-            : torch::Device(torch::kCPU); //select_device(opt["device"], opt["batch_size"]);
+    parse_args(args_default);
 
-        // Hyperparameters
-        VariantConfigs hyp;
-        if (std::get<std::string>(opt["hyp"]) == "")
-        {
-            hyp = set_cfg_hyp_default();
-        }
-        else
-        {
-            std::string hyp_file = std::filesystem::path(root_path).append(std::get<std::string>(opt["hyp"])).string();
-            hyp = load_cfg_yaml(hyp_file);
-        }
+    // 特殊处理
+    set_model();
+    get_task();
 
-        train(root_path, hyp, opt, device, FLAGS_jit_weights);
+    BaseTrainer newtrain(root_path, args_default);
+    if(FLAGS_runtype=="train")
+    {
+        newtrain.do_train();
+        // torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0)
+        //     : torch::Device(torch::kCPU); //select_device(opt["device"], opt["batch_size"]);
+
+        // train(root_path, args_default, device, FLAGS_jit_weights);
     }
     else if(FLAGS_runtype=="predict" || FLAGS_runtype == "jit")
     {
@@ -359,7 +342,6 @@ FLAGS_project ="runs/train_seg";
                     false, false, {}, 300, nm);
 
             std::vector<cv::Mat> mask_overlays;
-                
 
             for(int i = 0; i < bboxs.size(); i++)
             {
@@ -378,7 +360,6 @@ FLAGS_project ="runs/train_seg";
                         masks = process_mask(proto, mask_in, bboxes, shape, true);
                         std::cout << "is_segment " << boxs.sizes() << " masks: " << masks.sizes() << " " << masks.dtype() << " " << sizeof(torch::kFloat32) << std::endl;
                         cv::split(src_image, mask_overlays);
-
                     }                    
                     
                     for(int j = 0; j < boxs.size(0); j++)
@@ -472,122 +453,23 @@ FLAGS_project ="runs/train_seg";
     }
     else if(FLAGS_runtype=="temp_test")
     {
-        float confidence_threshold = 0.4f;
-        float iou_threshold = 0.45f;
-FLAGS_cfg = "models/segment/yolov5s-seg.yaml";
-FLAGS_weights = "runs/train_seg/exp1/weights/last.pt";
-        std::string prj_and_name = "runs/detect/exp";
-        auto search_path = std::filesystem::path(root_path).append(prj_and_name).string();
-        prj_and_name = increment_path(search_path, false);
-        std::cout << "save dir: " << prj_and_name << std::endl;
-        
-        if (!std::filesystem::exists(prj_and_name))
-            std::filesystem::create_directories(std::filesystem::path(prj_and_name));
-        
-        std::vector<std::string> img_files;
-        std::vector<std::string> img_types={".jpg"};
-        listallfiles_withsuffixes(std::filesystem::path(root_path).append("./data/images"), img_files, img_types);
+        Test_TorchFlip_Funs();
 
-        torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
+        auto test_case = [](const std::string& s) {
+            auto [b, v, sz, t] = parse_yolo_config(s);
+            if(!b)  
+                std::cout << "Invalid config: " << s << " not a yolo cfg type name" << std::endl;
+            else
+                std::cout << "Input: " << s << "\n  -> Version: " << v 
+                      << ", Size: " << (sz.empty() ? "[empty]" : sz)<< ", Task: " << (t.empty() ? "[empty]" : t) << "\n";
+            };
 
-        std::string model_filename = std::filesystem::path(root_path).append(FLAGS_cfg).string();
-        std::string weights_filename = std::filesystem::path(root_path).append(FLAGS_weights).string();
-
-        auto model = Model(model_filename, 80, FLAGS_img_size, FLAGS_img_size, 3, false);
-
-        if(1)
-        {
-            torch::serialize::InputArchive ckpt;
-            ckpt.load_from(weights_filename);
-
-            torch::serialize::InputArchive model_in;
-            if(ckpt.try_read("model", model_in))
-            {
-                model->load(model_in);
-                std::cout << "Load weights: " << weights_filename << " OK!" << std::endl;
-            }
-            else{
-                std::cout << "Load weights: " << weights_filename << " error!" << std::endl;
-            }
-        }
-        else{
-            torch::load(model, weights_filename);
-        }
-        model->to(device);
-        model->eval();
-
-        auto test_tensor = torch::ones({1, 3, FLAGS_img_size, FLAGS_img_size});
-        test_tensor = test_tensor.to(device);
-        model->forward(test_tensor);
-
-        std::vector<std::string> names={"person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-                                        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-                                        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-                                        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-                                        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-                                        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-                                        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-                                        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-                                        "hair drier", "toothbrush" };
-
-        for(int i = 0; i < img_files.size(); i++)
-        {
-            std::string filename = img_files[i];
-            cv::Mat src_image = cv::imread(filename);
-            int src_width = src_image.cols;
-            int src_height = src_image.rows;
-            cv::resize(src_image, src_image, cv::Size(FLAGS_img_size, FLAGS_img_size));
-            cv::Mat input_image;
-            cv::cvtColor(src_image, input_image, cv::COLOR_BGR2RGB);
-            at::Tensor input_tensor = torch::from_blob(input_image.data,
-                { 1, 640, 640, 3 }).to(device);    // 补齐batch_size维
-            input_tensor = input_tensor.permute({ 0, 3, 1, 2 }).contiguous();
-            
-            auto [pred , empty_v, pred_mask] = model->forward(input_tensor);
-               
-            bool is_segment = model->is_segment;
-            int nm = is_segment == true ? 32 : 0;
-
-            std::vector<torch::Tensor> bboxs;
-            bboxs= non_max_suppression(pred, confidence_threshold, iou_threshold, {},
-                false, false, {}, 300, nm);
-
-            for(int i = 0; i < bboxs.size(); i++)
-            {
-                auto boxs = bboxs[i];
-                std::cout << i << " box size: " << boxs.sizes() << std::endl;
-                if(boxs.size(0)!=0)
-                {
-                    for(int j = 0; j < boxs.size(0); j++)
-                    {
-                        auto x1 = boxs[j][0].item().toFloat();
-                        auto y1 = boxs[j][1].item().toFloat();
-                        auto x2 = boxs[j][2].item().toFloat();
-                        auto y2 = boxs[j][3].item().toFloat();
-                        auto score = boxs[j][4].item().toFloat();
-                        auto cls_id = boxs[j][5].item().toInt();
-
-                        auto typecolor = SingletonColors::getInstance()->get_color_scalar(cls_id);
-
-                        cv::rectangle(src_image, cv::Point(int(x1), int(y1)), cv::Point(int(x2), int(y2)), typecolor, 2);
-                        std::cout << i <<" " << j <<" " << x1 << " " <<y1 << " " << x2 << " " << y2 << " cls " << cls_id << " s: " << score << std::endl;
-
-                        std::stringstream ss;
-                        ss << names[cls_id] <<" " << std::to_string(score);
-                        cv::putText(src_image, ss.str(), cv::Point(x1, std::max(0, int(y1) - 2)), cv::FONT_HERSHEY_PLAIN, 1.,
-                            typecolor, 2);
-                    }
-                    cv::resize(src_image, src_image, cv::Size(src_width, src_height));
-                    cv::imshow("result", src_image);
-                    cv::waitKey();
-                    cv::destroyAllWindows();
-                
-                    auto save_name = std::filesystem::path(prj_and_name).append(std::filesystem::path(filename).filename().string()).string();
-                    std::cout << "save result to : " << save_name << std::endl;
-                    cv::imwrite(save_name, src_image);
-                }
-            }
-        }
+        test_case("yolov8.yaml");
+        test_case("yolov5s-obb.yaml");
+        test_case("yolov12m-pose.yaml");
+        test_case("yolov3x-cls.yaml");
+        test_case("yolo.yaml");
+        test_case("yolov5n.txt");
     }
 
     return 0;

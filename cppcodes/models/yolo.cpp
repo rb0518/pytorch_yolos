@@ -1,9 +1,68 @@
 ﻿#include <yaml-cpp/yaml.h>
+#include <filesystem>
 
 #include "yolo.h"
 #include "yaml_load.h"
 #include "common.h"
 #include "utils.h"
+
+#include "conv.h"
+#include "block.h"
+
+std::map<std::string, int> scales_key = {
+        {"n" , 0},
+        {"s" , 1},
+        {"m" , 2},
+        {"l" , 3},
+        {"x" , 4}
+    }; 
+
+std::vector<std::string> base_modules = {
+        "Classify", 
+        "Conv",         
+        "ConvTranspose", 
+        "GhostConv", 
+        "Bottleneck", 
+        "GhostBottleneck", 
+        "SPP", 
+        "SPPF", 
+        "C2fPSA", 
+        "C2PSA", 
+        "DWConv", 
+        "Focus", 
+        "BottleneckCSP", 
+        "C1", 
+        "C2", 
+        "C2f", 
+        "C3k2", 
+        "RepNCSPELAN4", 
+        "ELAN1", 
+        "ADown", 
+        "AConv", 
+        "SPPELAN", 
+        "C2fAttn", 
+        "C3", 
+        "C3TR", 
+        "C3Ghost", 
+        "torch.nn.ConvTranspose2d", 
+        "DWConvTranspose2d", 
+        "C3x", 
+        "RepC3", 
+        "PSA", 
+        "SCDown", 
+        "C2fCIB", 
+        "A2C2f"
+    };
+
+bool isInVector(const std::vector<std::string>& vec, const std::string& str) 
+{
+    for (const auto& s : vec) {
+        if (s == str) {
+            return true;
+        }
+    }
+    return false;
+}        
 
 int calculate_depth_gain(int n, float gd) {
     return (n > 1) ? std::max(static_cast<int>(std::round(n * gd)), 1) : n;
@@ -24,7 +83,6 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
     // 初始化工厂映射表（这里仅作为示例）
     if (factories.empty()) {
         factories["Conv"] = []() { return std::make_shared<ConvImpl>(); };
-        factories["BottleneckCS"] = [](){ return std::make_shared<BottleneckCSPImpl>();};
         factories["C3"] = []() { return std::make_shared<C3Impl>(); };
         factories["Concat"] = []() { return std::make_shared<ConcatImpl>(); };
         factories["SPPF"] = []() { return std::make_shared<SPPFImpl>(); };
@@ -33,6 +91,9 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
         factories["Focus"] = [](){ return std::make_shared<FocusImpl>(); };
         factories["Contract"] = []() { return std::make_shared<ContractImpl>(); };
         factories["Expand"] = []() { return std::make_shared<ExpandImpl>(); };
+        factories["C3k2"] = []() { return std::make_shared<C3k2Impl>(); };
+        factories["A2C2f"] = []() { return std::make_shared<A2C2fImpl>(); };
+        factories["C2PSA"] = []() { return std::make_shared<C2PSAImpl>(); };
     }
 
     auto it = factories.find(className);
@@ -43,207 +104,6 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
     }
 }
 
-// ===================== Detect module start ===========================
-DetectImpl::DetectImpl(int _nc, std::vector<std::vector<float>> _anchors, std::vector<int> _ch, 
-                    bool _inplace, bool _is_segment) 
-{
-    this->nc = _nc;
-    this->no = _nc + 5;
-    this->nl = _anchors.size();          // float
-    this->na = _anchors[0].size() / 2;
-    this->inplace = _inplace;
-    this->is_segment = _is_segment;
-
-    for (int i = 0; i < nl; i++)
-    {
-        this->grid.push_back(torch::zeros({1}));
-        this->anchor_grid.emplace_back(torch::zeros({1}));
-    }
-
-    for(int i = 0; i < _anchors.size(); i++)
-    {
-        for(int j = 0; j < _anchors[i].size(); j++)
-            flat_anchors.push_back(_anchors[i][j]);
-    }
-    anchors_ = torch::tensor(flat_anchors).view({this->nl, -1, 2});
-    register_buffer("anchors", anchors_);
-
-    if(false == is_segment)
-    {
-        for(int i = 0; i < _ch.size(); i++)
-            m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
-        register_module("m", m);
-    }
-}
-
-std::tuple<torch::Tensor, std::vector<torch::Tensor>> DetectImpl::forward(std::vector<torch::Tensor> x) 
-{
-    std::vector<torch::Tensor> ret(this->m->size()); // 用ModuleList，解决了named索引的一致，但后续操作不方便
-    std::vector<torch::Tensor> z(this->m->size());
-    torch::Tensor z_cat = torch::zeros({ 0 });
-    for (int i = 0; i < this->nl; i++)
-    {
-        auto mi = m[i]->as<torch::nn::Conv2d>();
-        ret[i] = mi->forward(x[i]);
-        auto bs = ret[i].size(0);     // batch_size
-        auto ny = ret[i].size(2);     // h
-        auto nx = ret[i].size(3);     // w
-    
-        anchors_ = anchors_.to(x[i].device());
-
-        // # x(bs,255,20,20) to x(bs,3,20,20,85)
-        ret[i] = ret[i].view({bs, na, no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
-
-        if (!is_training()) 
-        {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
-            bool bneed_make_grid = true;
-            if(bneed_make_grid)
-            {
-                std::tie(this->grid[i], this->anchor_grid[i]) = _make_grid(nx, ny, i);
-            }    
-            
-            this->grid[i] = this->grid[i].to(x[i].device());
-            this->stride = this->stride.to(x[i].device());
-            this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
-
-            auto splits = ret[i].sigmoid().split({2, 2, nc + 1}, 4);
-            auto xy = splits[0];
-            auto wh = splits[1];
-            auto conf = splits[2];
-
-            xy = (xy * 2 + grid[i]) * stride[i];
-            wh = (wh * 2).pow(2) * anchor_grid[i];
-            auto y = torch::cat({xy, wh, conf}, 4);   
-            z[i] = y.view({bs, na * nx * ny, no}).clone();
-        }
-    }
-
-    if(!is_training())
-    {
-        z_cat = torch::cat(z, 1);   //将z放到最前面 [bs, 25200, 85]
-    }
-    return { z_cat, ret};    // 统一返回格式，如是是predict return [x, z = []]
-}
-
-std::tuple<torch::Tensor, torch::Tensor> DetectImpl::_make_grid(int nx, int ny, int i)
-{
-    torch::Device d = this->named_buffers()["anchors"].device();
-    auto yvxv = torch::meshgrid({ torch::arange(ny).to(d), torch::arange(nx).to(d)}, "ij");
-    auto yv = yvxv[0];
-    auto xv = yvxv[1];
-    auto ret = torch::stack({ xv, yv}, 2).expand({1, na, ny, nx, 2}).to(torch::kFloat) - 0.5f;
-    auto an_grid = (anchors_[i].clone() * this->stride[i]).view({ 1, this->na, 1, 1, 2 })
-            .expand({ 1, this->na, ny, nx, 2 }).to(torch::kFloat);
-    return { ret, an_grid };
-}
-
-void DetectImpl::check_anchor_order()
-{
-    auto da = flat_anchors[flat_anchors.size()-1] - flat_anchors[0];
-    auto ds = stride[stride.size(0)-1].item().toFloat() - stride[0].item().toFloat();
-    if ((da * ds) < 0)
-    {
-        LOG(ERROR) << "Reversing anchor order.";
-        named_buffers()["anchors"] = named_buffers()["anchors"].flip(0);
-    }
-}
-
-// Initialize biases
-void DetectImpl::_initialize_biases(std::vector<int> cf)
-{
-    if(stride.size(0) != m->size())
-    {
-        LOG(ERROR) << "stride size not equil m size.";
-        return;
-    }
-
-    for (size_t i = 0; i < m->size(); ++i) {
-        auto s = stride[i].item().toFloat();
-        auto mi = m[i]->as<torch::nn::Conv2d>();
-        auto b = mi->bias.view({ na, -1 }); // conv.bias(255) to (3,85)
-        b.data().index_put_({torch::indexing::Slice(), 4},
-            b.index({ torch::indexing::Slice(), 4 }) +
-            std::log(8.0f / std::pow((640.0f / s), 2))); // obj (8 objects per 640 image)
-
-
-        b.data().index_put_({ torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None) },
-            b.index({ torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None) }) +
-            std::log(0.6f / (float(nc) - 0.99999f)));
- 
-        mi->bias.data().copy_(b.view({-1}));
-        mi->bias.set_requires_grad(true);
-    }
-}
-// ===================== Detect module over ===========================
-
-// =====================  Segment Moduel ===========================
-SegmentImpl::SegmentImpl(int _nc, std::vector<std::vector<float>> _anchors, 
-                    int _nm, int _npr, std::vector<int> _ch, bool _inplace) 
-                    : DetectImpl(_nc, _anchors, _ch, _inplace, true)
-{
-    this->nm = _nm;
-    this->npr = _npr;
-    this->no = _nc + 5 + nm;    // number of outputs per anchor
-    for(int i = 0; i < _ch.size(); i++)
-    {
-        m->push_back(torch::nn::Conv2d(torch::nn::Conv2dOptions(_ch[i], this->no * this->na, 1)));
-    }
-    register_module("m", m);
-    proto = Proto(_ch[0], npr, nm);
-    register_module("proto", proto);
-}
-
-std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> SegmentImpl::forward(std::vector<torch::Tensor> x) 
-{
-    std::vector<torch::Tensor> ret(this->m->size()); // 用ModuleList，解决了named索引的一致，但后续操作不方便
-    std::vector<torch::Tensor> z(this->m->size());
-    torch::Tensor z_cat = torch::zeros({ 0 });
-
-    torch::Tensor p_proto = proto->forward(x[0]);
-
-    for (int i = 0; i < this->nl; i++)
-    {
-        auto mi = m[i]->as<torch::nn::Conv2d>();
-        ret[i] = mi->forward(x[i]);
-        auto bs = ret[i].size(0);     // batch_size
-        auto ny = ret[i].size(2);     // h
-        auto nx = ret[i].size(3);     // w
-    
-        anchors_ = anchors_.to(x[i].device());
-
-        // # x(bs,351,20,20) to x(bs,3,20,20,117)
-        ret[i] = ret[i].view({bs, na, no, ny, nx}).permute({0, 1, 3, 4, 2}).contiguous();
-        // std::cout << ret[i].sizes() << std::endl;
-        if (!is_training()) 
-        {  // predict 需要解码数据转到bbox模式[xy, hw, conf, pred_cls]
-            bool bneed_make_grid = true;
-            if(bneed_make_grid)
-            {
-                std::tie(this->grid[i], this->anchor_grid[i]) = _make_grid(nx, ny, i);
-            }    
-            
-            this->grid[i] = this->grid[i].to(x[i].device());
-            this->stride = this->stride.to(x[i].device());
-            this->anchor_grid[i] = this->anchor_grid[i].to(x[i].device());
-            auto splits = ret[i].split_with_sizes({2, 2, nc + 1, no - nc - 5}, 4);
-            auto xy = splits[0];
-            auto wh = splits[1];
-            auto conf = splits[2];
-            auto mask = splits[3];
-            xy = (xy.sigmoid() * 2 + grid[i]) * stride[i];
-            wh = (wh.sigmoid() * 2).pow(2) * anchor_grid[i];
-            auto y = torch::cat({xy, wh, conf.sigmoid(), mask}, 4);   
-            z[i] = y.view({bs, na * nx * ny, no}).clone();
-        }
-    }
-
-    if(!is_training())
-    {
-        z_cat = torch::cat(z, 1);   //将z放到最前面 [bs, 25200, 85]
-    }
-    return { z_cat, ret, p_proto};    // 统一返回格式，如是是predict return [x, z = []]
-}
-// ===================== Segment module over ===========================
 ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo)
 {
     n_classes = classes;
@@ -254,13 +114,60 @@ ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, 
     cfgfile = yaml_file;
     if(b_showdebug)
         std::cout << "Config YAML file: " << yaml_file << std::endl;
+    std::string new_yamlfile = yaml_file;
+    auto guess_yaml_task = [](std::string& filepath) {
+        // 如给定为/path/to/yolov12n.yaml，但实际目录下只有yolov12.yaml, 人为指定scales="n"
+            std::filesystem::path fs_fullpath = std::filesystem::path(filepath);
+            bool fileexists_flag = std::filesystem::exists(fs_fullpath);
+            auto [is_right, v, s, t] = parse_yolo_config(fs_fullpath.filename().string());
+            if (false == is_right)
+            {
+                LOG(ERROR) << "cfg filename can't guess yolo version etc." << fs_fullpath.filename().string();
+                return std::make_tuple(is_right, v, s, t, filepath);
+            }
 
-    readconfigs(yaml_file);
+            if (s == "") 
+            {
+                s = "n";   // 默认取"n"
+            }
+            else {
+                if (!fileexists_flag)
+                {
+                    std::string stem_name = fs_fullpath.stem().string();
+                    size_t pos = stem_name.find(s);
+                    if(pos != std::string::npos) 
+                        stem_name.erase(pos, s.length());
+                    filepath = fs_fullpath.parent_path().append(stem_name + fs_fullpath.extension().string()).string();
+                }
+            }
+            return std::make_tuple(is_right, v, s, t, filepath);
+        };
+
+    auto [is_right, v, s, t, new_file] = guess_yaml_task(new_yamlfile);
+    if(false == is_right) 
+    {
+        LOG(ERROR) << "can't guess the cfg filename. "; 
+        exit(-1);
+    }
+    yolo_version = v;
+    scale_id = s;
+    task = t;
+
+    std::cout << "guess cfgs: " << (is_right ? "true" : "false") << " v " << v << " sacle: " << s << " task: "
+        << (t.empty() ? "Detect" : t) << std::endl;
+
+    std::cout << "old path: " << yaml_file << "\n";
+    std::cout << "exits path: " << new_file << "\n";
+
+    readconfigs(new_file);
     create_modules();
 
     this->train();
     torch::Tensor img_tmp = torch::zeros({ 1, channels, imageheight, imagewidth });
     img_tmp = img_tmp.to(this->named_parameters().begin()->value().device());
+
+    // std::cout << "create stride , input image: " << img_tmp.sizes() << std::endl;
+
     torch::Tensor pred;
     std::vector<torch::Tensor> train_ret(3);
     torch::Tensor pred_seg;
@@ -271,17 +178,19 @@ ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, 
     }
 
     last_module->stride = torch::tensor(strides);
-    last_module->check_anchor_order();
+    std::cout << "last_module->stride: " << last_module->stride << "\n";    // [8, 16, 32] CPULongType{3}
+    //last_module->check_anchor_order();
     //std::cout << "before div: " << module_detect->anchors_ << std::endl;
 
-    last_module->anchors_ = last_module->anchors_.div(last_module->stride.view({ -1, 1, 1 }));
+    //last_module->anchors_ = last_module->anchors_.div(last_module->stride.view({ -1, 1, 1 }));
 
     //std::cout << "after div: " << module_detect->anchors_ << std::endl;
 
     stride = last_module->stride;
-    last_module->_initialize_biases(); 
-
+    last_module->bias_init(); 
+    std::cout << "bias_init: over" << std::endl;
     initialize_weights();
+    std::cout << "initialize_weights: over" << std::endl;
 }
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::forward(torch::Tensor x)
@@ -317,8 +226,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
             else
                 layer_outputs.push_back(module_layers[i]->forward(tmp));
         }
-        if(b_showdebug)
-            std::cout << "layer_id: "<< std::setw(5) << i << std::setw(20) << layer_cfgs[i].name << " " << layer_outputs[i].sizes() << std::endl;
+        //std::cout << "layer_id: "<< std::setw(5) << i << std::setw(20) << layer_cfgs[i].name << " " << layer_outputs[i].sizes() << std::endl;
     }
 
     // Detect & Segment convs forward
@@ -332,37 +240,65 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
     if(is_segment == false)
     {
         std::tie(detect_pred, detect_outs) = last_module->forward(tmp);
-        segment_pred = torch::empty({0});
+        segment_pred = torch::empty({0}).to(detect_pred.device());
+        //std::cout << "Detect return : " << detect_pred.sizes() << " proto: " << segment_pred.sizes() << std::endl;
     }
     else
     {
-        std::shared_ptr<SegmentImpl> last_s = std::dynamic_pointer_cast<SegmentImpl>(last_module);
-        std::tie(detect_pred, detect_outs, segment_pred) = last_s->forward(tmp);
+        // std::shared_ptr<SegmentImpl> last_s = std::dynamic_pointer_cast<SegmentImpl>(last_module);
+        // std::tie(detect_pred, detect_outs, segment_pred) = last_s->forward(tmp);
+        //std::cout << "Segment return : " << detect_pred.sizes() << " proto: " << segment_pred.sizes() << std::endl;
     }
 
     return { detect_pred, detect_outs, segment_pred};
 }
 
-void ModelImpl::readconfigs(const std::string& yaml_file)
+void ModelImpl::readconfigs(const std::string& yaml_file, std::string scale_id /*= "n"*/)
 {
     YAML::Node cfgs = YAML::LoadFile(yaml_file);
    
-    //std::cout << cfgs << std::endl;
-    
     int nc = cfgs["nc"].as<int>();
-    depth_multiple = cfgs["depth_multiple"].as<float>();
-    width_multiple = cfgs["width_multiple"].as<float>();
+    if(nc != n_classes){
+        LOG(WARNING) << "read nc " << nc << " no equil n_class. check cfg yaml.";
+    }
+
+    if (cfgs["depth_multiple"].IsDefined())
+    {   // 旧格式文件中是放在一块的
+        depth_multiple = cfgs["depth_multiple"].as<float>();
+        width_multiple = cfgs["width_multiple"].as<float>();
+    }
+    else if(cfgs["scales"].IsDefined())
+    {
+        std::cout << "use new stype cfg yaml. \n";
+        YAML::Node node_scales = cfgs["scales"];
+        if (node_scales[scale_id].IsDefined())
+        {
+            std::vector<float> n_scale = node_scales[scale_id].as<std::vector<float>>();
+            std::cout << "scale: " << scale_id <<" - depth: " << n_scale[0] << " width: " << n_scale[1] << " max_channels: " << int(n_scale[2]) << std::endl;
+            depth_multiple = n_scale[0];
+            width_multiple = n_scale[1];
+            n_maxchannels = int(n_scale[2]);
+        }
+    }
+    else
+    {
+        std::cout << "not found depth & width multiple and not found scales Node. \n";
+    }
+
 
     // load anchors
-    YAML::Node node_anchors = cfgs["anchors"];   
-    if(!node_anchors.IsNull() && node_anchors.IsSequence())
+    if (cfgs["anchors"].IsDefined())
     {
-        for(YAML::const_iterator it = node_anchors.begin(); it != node_anchors.end(); ++it){
-            if((*it).IsSequence()){
-                anchors.push_back(it->as<std::vector<float>>());
+        YAML::Node node_anchors = cfgs["anchors"];
+        if (!node_anchors.IsNull() && node_anchors.IsSequence())
+        {
+            for (YAML::const_iterator it = node_anchors.begin(); it != node_anchors.end(); ++it) {
+                if ((*it).IsSequence()) {
+                    anchors.push_back(it->as<std::vector<float>>());
+                }
+                else
+                    LOG(ERROR) << "The yaml anchors define not suppert.";
             }
-            else
-                LOG(ERROR) << "The yaml anchors define not suppert.";
         }
     }
    
@@ -424,22 +360,46 @@ void ModelImpl::create_modules()
     module_layers.resize(layer_cfgs.size()-1);    // Detect Segment单独构造
     for (int i = 0; i < layer_cfgs.size() - 1; i++)
     {
+        //std::cout << "\n create layer " << i << " " << layer_cfgs[i].name;
         int ch_in = i == 0 ? this->n_channels : layer_out_chs[i - 1];
         layer_froms.push_back(layer_cfgs[i].froms);
         int n = calculate_depth_gain(layer_cfgs[i].number, depth_multiple);
 
-        if (layer_cfgs[i].name == "Conv" ||
-            layer_cfgs[i].name == "SPP" ||
-            layer_cfgs[i].name == "SPPF" ||
-            layer_cfgs[i].name == "C3" ||
-            layer_cfgs[i].name == "Focus")
+        if(isInVector(base_modules, layer_cfgs[i].name))
         {
             int c2 = std::get<int>(layer_cfgs[i].args[0]);
-            //std::cout << "c2 - 0: " << c2 << " " << width_multiple;
-            c2 = make_divisible(float(c2) * width_multiple, 8);
-            //std::cout << " c2 - 1: " << c2 << std::endl;
-
+            if(c2 != n_classes)
+            {
+                //std::cout <<" layer " << i << " name " << layer_cfgs[i].name << " old c2: " << c2;
+                c2 = make_divisible(float(std::min(c2, n_maxchannels)) * width_multiple, 8);
+                //std::cout <<" change to: " << c2 << "\n";
+            }
             layer_cfgs[i].args[0] = c2;
+
+            if(layer_cfgs[i].name == "C3k2")
+            {
+                legacy = false;
+                if(scales_key[scale_id] >= scales_key["m"])
+                {
+                    std::cout << "C3k2: " << scale_id << " args[1] " << std::get<bool>(layer_cfgs[i].args[1]);
+                    layer_cfgs[i].args[1] = true;
+                    std::cout << " change to : " << std::get<bool>(layer_cfgs[i].args[1]) << "\n";
+                }
+            }
+            if(layer_cfgs[i].name == "A2C2f")
+            {
+                legacy = false;
+                /*
+                    if scale in "lx":  # for L/X sizes
+                        args.extend((True, 1.2))
+                */
+                if(scales_key[scale_id] >= scales_key["l"])
+                {
+                    std::cout << "A2C2f: " << scale_id << " add args [3] & [4] ";                    
+                    layer_cfgs[i].args[3] = true;
+                    layer_cfgs[i].args[4] = 1.2f;
+                }
+            }
         }
         // 根据layer_cfgs[i].name, 生成对应的Module，并压入vector中
         module_layers[i] = createObject(layer_cfgs[i].name);
@@ -477,8 +437,9 @@ void ModelImpl::create_modules()
 
     if(final_layercfgs.name == "Detect") 
     {
-        last_module = std::make_shared<DetectImpl>(n_classes, anchors, inchannels, false);
+        last_module = std::make_shared<DetectImpl>(n_classes, inchannels);
     }
+    /*
     else{
         is_segment = true;
         std::cout << "Create segment layer: " << std::endl;
@@ -491,7 +452,9 @@ void ModelImpl::create_modules()
         std::cout << " after : " << tmp_npr << std::endl;
         last_module = std::make_shared<SegmentImpl>(n_classes, anchors, nm, tmp_npr, inchannels, false);
     }
+    */
     register_module("model-" + std::to_string(layer_cfgs.size()-1), last_module);    
+    //std::cout << "Create modules over..." << std::endl;
 }
 
 void ModelImpl::initialize_weights()

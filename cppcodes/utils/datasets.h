@@ -10,6 +10,8 @@
 #include "utils.h"
 #include <random>
 
+#define USE_YOLOCustom 1
+
 int listallfiles_withsuffixes(const std::filesystem::path& path, 
 	std::vector<std::string>& file_lists, std::vector<std::string> suffixes, bool enable_subfolder = false);
 
@@ -26,97 +28,90 @@ struct CustomExample{
 	torch::Tensor data;
 	torch::Tensor target;
 	std::vector<std::string> path;
-	std::vector<std::vector<float>> shape;
+	//std::vector<std::vector<float>> shape;
+	torch::Tensor ori_shape;
+	torch::Tensor resized_shape;
 	torch::Tensor mask;
 };
 /*
 	注意std::vector<T> ==> T
 */
-struct CustomCollate : torch::data::transforms::Collation<CustomExample>{
-    CustomExample apply_batch(std::vector<CustomExample> batch) override 
+// 2025-10-18 根据Ultralytics YOLO最新代码中数据格式要求，先修改数据组织格式，后续重新编写Dataset代码
+// IValue作为Dict的Key, Value在C++中有限定，可以通过c10::impl::GenericDict来构建，但在参数传递的时候
+// 还有指针交换时，编译会报错，用std::map代替是为了保留代码，并让编译器通过
+// using YoloCustomExample = c10::Dict<std::string, c10::IValue>
+using YoloCustomExample = c10::Dict<std::string, torch::Tensor>;
+struct YoloCustomCollate : torch::data::transforms::Collation<YoloCustomExample> 
+{
+public:	
+	YoloCustomExample apply_batch(std::vector<YoloCustomExample> batch) override
 	{
-		std::vector<torch::Tensor> datas, targets, masks;
-		std::vector<std::string> paths;
-		std::vector<std::vector<float>> shapes;
-		bool is_segment = true;
-
-		// 通过mask的sizes()大小判定是哪类数据，在非Segment数据中，mask插入的是torch::zeros({1});
-		if(batch[0].mask.sizes().size() == 1)
-			is_segment = false;
-		
-		if(is_segment)
+		std::vector<torch::Tensor> v_imgs;
+		std::vector<torch::Tensor> v_cls;
+		std::vector<torch::Tensor> v_bboxes;
+		std::vector<torch::Tensor> v_batch_idx;
+//		torch::List<std::string> v_im_files;	//IValue不能用，std::string不太好转换torch::Tensor，暂时不用
+		/*
+			后续可以用struct YoloCustomExample{
+				vector<string> path,
+				torch::Dict<string, Tensor> labels
+			}; 来传递path
+		*/
+		std::vector<torch::Tensor> v_ori_shapes;
+		std::vector<torch::Tensor> v_resized_shapes;
+		std::vector<torch::Tensor> v_masks;
+		for(int i_idx = 0; i_idx < batch.size(); i_idx++)
 		{
-			bool allmask_dim0_is_one = true;
-			for (auto& item : batch)
+			auto item = batch[i_idx];
+			v_imgs.push_back(item.at("img"));
+			v_cls.push_back(item.at("cls"));
+			auto bboxes = item.at("bboxes");
+			v_bboxes.push_back(bboxes);
+			
+			auto t_idx = item.at("batch_idx");
+			t_idx.fill_(i_idx);
+			v_batch_idx.push_back(t_idx);
+			// 对其它如segment, pose数据的支持后续完成
+
+			// auto im_file = item.at("im_file").toList();
+			// v_im_files.push_back(im_file.get(0).toStringRef());
+			v_ori_shapes.push_back(item.at("ori_shape"));
+			v_resized_shapes.push_back(item.at("resized_shape"));
+			if (item.contains("mask"))
 			{
-				if (item.mask.size(0) != 1)
-				{
-					allmask_dim0_is_one = false;
-					break;
-				}
-			}
-
-			int i = 0;
-			for (auto& item : batch) {
-				datas.push_back(item.data);
-				auto label = item.target;
-				if (label.sizes().size() == 2 && label.size(0) != 0)
-				{
-					label.index_put_({ "...", 0 }, i);
-					targets.push_back(item.target);
-					masks.push_back(item.mask);
-				}
-				else
-				{// masks必须保持与targets同步压入数据，是否需要else里压入空图作为背景，后续根据loss里数据需求分析后添加
-					// masks是根据overlap bool值变化，false 一种是跟masks保持dim(0)的一致, true 保持跟 datas一致
-					if (allmask_dim0_is_one)		// 暂时这么处理，后续修改将overlap标志压入到 CustomExampleSeg 中
-						masks.push_back(item.mask);
-				}
-
-				paths.push_back(item.path[0]);
-				shapes.push_back(item.shape[0]);
-				i += 1;
+				v_masks.push_back(item.at("mask"));
 			}
 		}
-		else
-		{
-			int i = 0;
-			for (auto& item : batch) {
-				datas.push_back(item.data);
-				masks.push_back(item.mask);
-				auto label = item.target;
-				if (label.sizes().size() == 2 && label.size(0)!=0)
-				{
-					label.index_put_({ "...", 0 }, i);
-					targets.push_back(item.target);
-				}
+		YoloCustomExample ret_example;
+		//ret_example.insert({ "im_file", torch::IValue(v_im_files) });
+		ret_example.insert( "ori_shape", torch::stack(v_ori_shapes));
+		ret_example.insert( "resized_shape", torch::stack(v_resized_shapes));
 
-				paths.push_back(item.path[0]);
-				shapes.push_back(item.shape[0]);
-				i+=1;
-			}
-		}
-		CustomExample ret = {torch::stack(datas), torch::cat(targets),paths, shapes, torch::cat(masks)};
-		return ret;
-    }
+		ret_example.insert( "img", torch::stack(v_imgs, 0));		// n:[3, 640, 640] ==> [n, 3, 640, 640];
+		ret_example.insert( "cls", torch::cat(v_cls, 0));		// [[n1], [n2]...[nx] => [n1+n2+...+nx];
+		ret_example.insert( "bboxes", torch::cat(v_bboxes, 0));
+		ret_example.insert( "batch_idx", torch::cat(v_batch_idx, 0));
+
+		if(v_masks.size())
+			ret_example.insert( "target", torch::stack(v_masks));
+		// 显式构造目标字典类型
+		return ret_example;
+	}
 };
 
 // ============================== class LoadImagesAndLabels ==========================
-class LoadImagesAndLabels : public torch::data::Dataset<LoadImagesAndLabels, CustomExample>
+class LoadImagesAndLabels : public torch::data::Dataset<LoadImagesAndLabels, YoloCustomExample>
 {
 public:
-	LoadImagesAndLabels(std::string _path, VariantConfigs _hyp,
-		int _img_size, bool _augment, bool _rect, bool _single_cls, int _stride, float _pad, 
-		bool _is_segment = false, bool _is_overlap = false, int _downsample_ratio = 4);
+	LoadImagesAndLabels(std::string _path, VariantConfigs* _args, int _stride = 32, bool _is_segment = false);			
+	YoloCustomExample get(size_t index);
 
-	CustomExample get(size_t index);
 	torch::optional<size_t> size() const override {
 		return img_files.size();
 	}
-
 public:
 	std::string		path;
-	VariantConfigs	hyp;
+	VariantConfigs*	args;
 	int				img_size = 640;
 	bool			augment = false;
 	bool			rect = false; 
@@ -132,7 +127,7 @@ public:
 
 	std::string		images_dir;
 	std::string		labels_dir;
-	std::vector<int> indices;	// �洢���������
+	std::vector<int> indices;	// 生成乱序队列
 
 	bool is_segment = false;
 	bool overlap = false;
@@ -145,25 +140,50 @@ public:
 	std::tuple<cv::Mat, torch::Tensor, std::vector<torch::Tensor>> load_mosaic_segment(int index);
 };
 
-// 更换为shared_ptr的原因是因为std::unique_ptr不利于每次epoch调用val时指针的传递
-#if 1
-using Dataloader_Custom = std::unique_ptr<torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabels, CustomCollate>, torch::data::samplers::SequentialSampler>>;
-#else
-typedef torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabels, CustomCollate>, torch::data::samplers::SequentialSampler>  Dataloader_CutomeType;
-//typedef torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabels, CustomCollate>, torch::data::samplers::RandomSampler>  Dataloader_CutomeType;
-typedef std::shared_ptr<Dataloader_CutomeType> Dataloader_Custom;
-#endif
+using Dataloader_Custom = std::unique_ptr<torch::data::StatelessDataLoader<torch::data::datasets::MapDataset<LoadImagesAndLabels, YoloCustomCollate>, torch::data::samplers::SequentialSampler>>;
+
 std::tuple<Dataloader_Custom, int> create_dataloader(
 						const std::string& path,
-                        int imgsz,
-						int nc,
-                        int batch_size,
-                        int stride,
-                        VariantConfigs& opt,
-                        VariantConfigs& hyp,
-                        bool augment = false,
-                        float pad = 0.0f,
+						VariantConfigs args,
+                        int stride = 32,
 						bool is_val = false,
-						bool is_segment = false,
-						bool is_overlap = false,
-						int downsample_ratio = 4);
+						bool is_segment = false);						
+
+inline void check_batchsize(VariantConfigs& args)
+{
+	int batchsize = std::get<int>(args["batch"]);
+	if (batchsize <= 0 || batchsize > 32)
+		args["batch"] = 16;
+}
+
+class DataloaderBase
+{
+public:
+	explicit DataloaderBase(const std::string& root_path, VariantConfigs& _args_input, int stride = 32, 
+		bool _is_val = false, bool is_segment = false);
+
+	int get_total_samples(bool batch = false) {
+		if (!batch)
+			return total_numbers;
+		int add_1 = total_numbers % batch_size;
+		int num_batch = (total_numbers - add_1) / batch_size;
+		if(add_1) num_batch += 1;
+		std::cout << "total_numbers: " << total_numbers << " batch size: " << batch_size << " number of batch: " << num_batch << std::endl;
+		return num_batch;
+	}
+
+	void cloase_mosaic(bool bclose);
+	bool parse_data_yaml(const std::string& root);
+	int get_batch_size() { return batch_size; }
+public:
+	Dataloader_Custom dataloader;
+private:
+	int total_numbers = 0;
+	int batch_size = 16;
+	bool is_val = false;
+	std::string 	data_yaml_path;
+	VariantConfigs  args;
+	std::string		datasets_path;
+	std::vector<std::string> names;
+};
+

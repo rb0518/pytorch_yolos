@@ -1,15 +1,74 @@
-#include "utils.h"
+﻿#include "utils.h"
 #include "torch_utils.h"
 
-std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<Model> ptr_model, VariantConfigs& opt, VariantConfigs& hyp)
+torch::Device get_device(const std::string& dev_set)
 {
-    auto model = ptr_model->get();
+    std::string device_define = dev_set;
+    torch::Device device = torch::Device(torch::kCPU);
+
+    int device_count = torch::cuda::device_count();
+
+    // "CPU" or "CUDA" or "0" ..."2"
+    std::transform(device_define.begin(), device_define.end(), device_define.begin(),
+        [](unsigned char c) {return std::toupper(c); });
+
+    auto [idx, is_ok] = ConvertToNumber(device_define);
+    if (is_ok)
+    {
+        int gpu_idx = int(idx);
+        if (gpu_idx >= 0 && gpu_idx < device_count)
+            device = torch::Device(c10::DeviceType::CUDA, gpu_idx);
+        else if (device_count)
+        {
+            LOG(WARNING) << "select GPU id: " << gpu_idx << " wrong. use default device 0.";
+            device = torch::Device(c10::DeviceType::CUDA);
+        }
+        else
+        {
+            device = torch::Device(torch::kCPU);
+        }
+    }
+    else if (device_define == "CPU" || device_define == "CUDA" || device_define == "GPU")
+    {
+        if ((device_define == "GPU" || device_define == "CUDA") && device_count)
+        {
+            device = torch::Device(c10::DeviceType::CUDA);
+        }
+        else
+        {
+            std::cout << ColorString("Device: ") << "CPU \n";
+            device = torch::Device(torch::kCPU);
+        }
+    }
+    else
+    {
+        if (device_count)
+        {
+            LOG(WARNING) << "your select device type: " << dev_set << " wrong. use default device 0.";
+            device = torch::Device(c10::DeviceType::CUDA);
+        }
+        else
+        {
+            LOG(WARNING) << "your select device type: " << dev_set << " wrong. use default CPU.";
+            device = torch::Device(c10::DeviceType::CPU);
+        }
+    }
+
+
+    std::cout << "get_device return device type: " << device.type() << std::endl;
+    return device;
+}
+
+
+std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<ModelImpl> ptr_model, VariantConfigs& args)
+{
+    auto model = ptr_model.get();
     const int nbs = 64;
-    int batch_size = std::get<int>(opt["batch_size"]);
+    int batch_size = std::get<int>(args["batch"]);
     int accumulate = std::max(static_cast<int>(std::round(nbs / batch_size)), 1);
-    float lr0 = std::get<float>(hyp["lr0"]);
-    float momentum = std::get<float>(hyp["momentum"]);
-    float weight_decay = std::get<float>(hyp["weight_decay"]);
+    float lr0 = std::get<float>(args["lr0"]);
+    float momentum = std::get<float>(args["momentum"]);
+    float weight_decay = std::get<float>(args["weight_decay"]);
     weight_decay = weight_decay * float(batch_size * accumulate / nbs);
 
     std::shared_ptr<torch::optim::Optimizer> optimizer{ nullptr };
@@ -32,7 +91,7 @@ std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer
         }
     }
 
-    if (std::get<bool>(opt["adam"]))
+    if (std::get<std::string>(args["optimizer"]) == "adam")
     {
          
         std::cout << "Adam" << " lr0 " << lr0 << std::endl;
