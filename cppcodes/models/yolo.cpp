@@ -229,13 +229,44 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
         //std::cout << "layer_id: "<< std::setw(5) << i << std::setw(20) << layer_cfgs[i].name << " " << layer_outputs[i].sizes() << std::endl;
     }
 
+
     // Detect & Segment convs forward
-    int module_id = layer_cfgs.size() - 1;
     std::vector<torch::Tensor> tmp;
+    int module_id = layer_cfgs.size() - 1;    
+
+    #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+    if(layer_outputs[0].size(0) == std::get<int>(p_args->at("batch")) && std::get<bool>(p_args->at("use_unified_batch")))
+    {
+        std::vector<torch::Tensor> new_layer_outputs;
+        for(int i = 0; i < layer_outputs.size(); i++)
+        {
+            std::string layer_import_name = "ly" + std::to_string(i)+".pt";
+            auto import_tensor = load_tensordata_from_file(layer_import_name);
+            std::cout << i << " import_tensor: " << import_tensor.sizes() << " dtype: " << import_tensor.dtype() << " device: " << import_tensor.device().str() << std::endl;
+            std::cout << i << " layer_outputs: " << layer_outputs[i].sizes() << " dtype: " << layer_outputs[i].dtype() << " device: " << layer_outputs[i].device().str() << std::endl;
+            import_tensor = import_tensor.to(layer_outputs[i].dtype());
+            import_tensor = import_tensor.to(layer_outputs[i].device());
+            new_layer_outputs.push_back(import_tensor);
+        }
+
+        for(auto item : layer_froms[module_id])
+        {
+            tmp.push_back(new_layer_outputs[item]);
+        }
+    }
+    else
+    {
+        for(auto item : layer_froms[module_id])
+        {
+            tmp.push_back(layer_outputs[item]);
+        }
+    }
+    #else
     for(auto item : layer_froms[module_id])
     {
         tmp.push_back(layer_outputs[item]);
     }
+    #endif
 
     if(is_segment == false)
     {

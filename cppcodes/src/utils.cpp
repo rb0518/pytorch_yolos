@@ -12,6 +12,7 @@
 #include <chrono>
 
 #include "plots.h"
+#include "yaml_load.h"
 
 torch::Tensor xyxy2xywh(const torch::Tensor& x)
 {
@@ -339,6 +340,10 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     auto jit_params_count = jit_params.size();
     int n_params = 0;
     int count_changes = 0;
+#ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+    std::vector<std::string> match_layers;
+    match_layers.push_back("model.23.");
+#endif
 
     for (auto& param : model.named_parameters())
     {
@@ -348,12 +353,16 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         //std::cout << "model named_parameters: " << str_name << std::endl;
         //  "model-1.m-1.bn1.bias" ==> "model.1.m.1.bn1.bias
         str_name = std::regex_replace(str_name, std::regex("-"), ".");
-        
+#ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_        
+        auto ret_str = findSubstringInStrings(str_name, match_layers);
+        if (jit_params.find(str_name) != jit_params.end() && ret_str != "")
+#else
         if (jit_params.find(str_name) != jit_params.end())
+#endif
         {
             if (jit_params[str_name].sizes() == param.value().sizes())
             {
-                //std::cout << "trans ok : " << str_name << std::endl;
+                std::cout << "trans ok : " << str_name << std::endl;
                 count_changes += 1;
                 param.value().data().copy_(jit_params[str_name].data());
             }
@@ -659,3 +668,61 @@ std::vector<torch::Tensor> non_max_suppression(
 }
 
 }   // end namespace ops
+
+// 2025-10-30 整理代码，调试工具，读取pytorch代码输出的Tensor文件
+
+// 函数：读取二进制文件到内存缓冲区
+std::vector<char> readBinaryFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open binary file " << filename << std::endl;
+        return {};
+    }
+    
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    std::vector<char> buffer(size);
+    if (!file.read(buffer.data(), size)) {
+        std::cerr << "Error: Failed to read the entire file " << filename << std::endl;
+        return {};
+    }
+    
+    file.close();
+    return buffer;
+}
+
+torch::Tensor load_tensordata_from_file(std::string filename)
+{
+    std::vector<char> buffer = readBinaryFile(filename);
+
+    torch::IValue x_pickle = torch::pickle_load(buffer);
+    torch::Tensor x_clone = x_pickle.toTensor();
+    std::cout << "read: " << filename << " x: " << x_clone.sizes() << std::endl;
+
+    // 可以修改参数，引入目标Tensor，在这里做判定
+    // if(x.sizes() == x_clone.sizes())
+    // {
+    //     std::cout << "sizes() equil, copy.\n";
+    // }
+    // else{
+    //     std::cout << "sizes() error, return x\n";
+    // }
+    /*
+
+    auto x_clone_sizes = x_clone.element_size() * x_clone.numel();
+    std::cout << "load_tensordata_from_file, target size: " << x_clone.sizes() 
+        << " total_size: " << x_clone_sizes << std::endl;
+    std::cout << "load file byte count: " << buffer.size() << std::endl;
+
+    if (x_clone_sizes == buffer.size())
+    {
+        std::cout << "copy buffer to tensor...";
+        std::memcpy(x_clone.data_ptr(), buffer.data(), buffer.size());
+        std::cout << "copy over..." << std::endl;
+    }
+
+    x_clone = x_clone.to(x.device());
+    */
+    return x_clone;
+}

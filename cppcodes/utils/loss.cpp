@@ -4,7 +4,9 @@
 
 //  c10::Dict<std::string, torch::IValue> hyp;
 #include <torch/torch.h>
+#include <torch/script.h>
 #include <cmath>
+#include <filesystem>
 
 //--------------------------- start V8DetectionLoss --------------------------
 v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int tal_topk /*= 10*/)
@@ -15,14 +17,12 @@ v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int t
         torch::nn::BCEWithLogitsLossOptions().reduction(torch::kNone));
     std::shared_ptr<DetectImpl> m = model->last_module;
 
-    hyp = model->hyp;
-    if(model->hyp.size())
-        for (auto& [k, v] : model->hyp)
-        {
-            hyp[k] = v;
-        }
-
-    //show_cfg_info("v8 hyp", hyp);
+    hyp = model->p_args;
+    // check
+    if(hyp == nullptr || hyp->size() == 0)
+    {
+        std::cout << ColorString("v8DetectionLossImpl", "R") << "get model::p_args is nullptr" << std::endl;
+    }
 
     this->stride = m->stride;
     this->nc = m->nc;
@@ -89,6 +89,12 @@ torch::Tensor v8DetectionLossImpl::bbox_decode(torch::Tensor anchor_points, torc
     return dist2bbox(pred_dist, anchor_points, false);
 }
 
+/*
+save feats0: torch.Size([16, 144, 80, 80]) as preds0.pt
+save feats1: torch.Size([16, 144, 40, 40]) as preds1.pt
+save feats2: torch.Size([16, 144, 20, 20]) as preds2.pt
+save targets torch.Size([164, 6])
+*/
 std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vector<torch::Tensor>& preds,
     torch::Dict<std::string, torch::Tensor>& batch)
 {
@@ -101,10 +107,43 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     std::vector<torch::Tensor> feats = preds;
     std::vector<torch::Tensor> views;
     int feats0_size0 = feats[0].size(0);
+    #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+    // 2025-10-29 输出测试数据给pytorch代码，pytorch中用torch.jit.load读取
+    if(save_tensor_firsttime)
+    {
+        torch::save({
+                feats[0],
+                feats[1],
+                feats[2],
+                batch.at("batch_idx"),
+                batch.at("cls"),
+                batch.at("bboxes")
+            }, "c_test.pt" );
+            std::cout << "feats[0]: " << feats[0].sizes() << std::endl;
+            std::cout << "feats[1]: " << feats[1].sizes() << std::endl;
+            std::cout << "feats[2]: " << feats[2].sizes() << std::endl;
+            std::cout << "batch_idx: " << batch.at("batch_idx").sizes() << std::endl;
+            std::cout << "cls: " << batch.at("cls").sizes() << std::endl;
+            std::cout << "bboxes: " << batch.at("bboxes").sizes() << std::endl;
+        save_tensor_firsttime = false;
+    }
+    #endif
     for (int i = 0; i < feats.size(); i++)
     {
-        auto xi = feats[i].clone();
-        views.push_back(xi.view({ feats0_size0, this->no, -1 }));
+        #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+        if(std::get<bool>(hyp->at("use_unified_batch")))
+        {
+            auto xi = load_tensordata_from_file("preds" + std::to_string(i) + ".pt");
+            if(xi.sizes() == feats[i].sizes())
+            {
+                xi = xi.to(feats[i].dtype());
+                xi = xi.to(feats[i].device());
+                feats[i].data().copy_(xi.data());
+                std::cout <<" feats{ " << i << "} copy data from file" << std::endl;
+            }
+        }
+        #endif
+        views.push_back(feats[i].view({ feats0_size0, this->no, -1 }));
     }
 
     auto cat_result = torch::cat(views, 2);
@@ -151,12 +190,12 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
                                                                 gt_labels,
                                                                 gt_bboxes,
                                                                 mask_gt);
-    // std::cout << "4 -- assigner over...\n";
+    //std::cout << "4 -- assigner over...\n";
 
     // 正负样本都参与了损失计算
     float target_scores_sum = std::max(target_scores.sum().item<float>(), 1.0f);
     loss[1] = this->bce->forward(pred_scores, target_scores.to(dtype)).sum().item<float>() / target_scores_sum;
-
+    //std::cout << "cls loss: " << loss[1] << std::endl;
     //std::cout << "5 -- bce over...\n";        
     if (fg_mask.sum().item().toInt())
     {
@@ -168,13 +207,19 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
         loss[0] = tmp_lbox;
         loss[2] = tmp_ldfl;
     }
-
-    hyp["dfl"] = 1.5f;
-    hyp["box"] = 7.5f;
-    hyp["cls"] = 0.5f;
-    loss[0] = loss[0].item().toFloat() * std::get<float>(hyp["box"]);
-    loss[1] = loss[1].item().toFloat() * std::get<float>(hyp["cls"]);
-    loss[2] = loss[2].item().toFloat() * std::get<float>(hyp["dfl"]);
+    //std::cout << "6 -- box loss over...\n";   
+    float _dfl_ratio = 1.0;
+    float _box_ratio = 1.0;
+    float _cls_ratio = 1.0;
+    if(hyp!=nullptr && hyp->size() != 0)
+    {
+        _dfl_ratio = std::get<float>(hyp->at("dfl"));
+        _box_ratio = std::get<float>(hyp->at("box"));
+        _cls_ratio = std::get<float>(hyp->at("cls"));
+    }    
+    loss[0] = loss[0].item().toFloat() * _box_ratio;
+    loss[1] = loss[1].item().toFloat() * _cls_ratio;
+    loss[2] = loss[2].item().toFloat() * _dfl_ratio;
     return { loss.sum() * batch_size, loss.detach() };
 }
 //--------------------------- end V8DetectionLoss --------------------------

@@ -332,6 +332,9 @@ void BaseTrainer::setup_model()
         LOG(ERROR) << "Create model error.";
         exit(-1);
     }
+
+    model->set_args_prt(&args); // 传递指针，适应全局变量需要
+
     model->show_modelinfo();
     model->to(device);
 }
@@ -636,7 +639,16 @@ void BaseTrainer::do_train()
 
             if (ni <= nw)
                 do_warmup(epoch, ni, nw, nbs, train_loader->get_batch_size());
-
+            #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+            if(std::get<bool>(args["use_unified_batch"]))
+            {
+                batch.insert("img", load_tensordata_from_file("test_img.pt"));
+                batch.insert("batch_idx", load_tensordata_from_file("test_batch_idx.pt"));
+                batch.insert("cls", load_tensordata_from_file("test_cls.pt"));
+                batch.insert("bboxes", load_tensordata_from_file("test_bboxes.pt"));
+                std::cout << "use unified batch data over.\n";
+            }
+            #endif
             auto prepro_data = preprocess_batch(batch);
 
             int num_targets = prepro_data[1].size(0);

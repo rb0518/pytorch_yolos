@@ -188,3 +188,10 @@ namespace ops {
         bool rotated = false
         );
 } //end namespace ops
+
+// 2025-10-30 读取pytorch export Tensor文件
+/*
+    pytorch中torch.save调用pickle_save模式，libtorch中torch::save和
+    torch::load是保持与torch::jit::load torch::jit::save一致
+*/
+torch::Tensor load_tensordata_from_file(std::string filename);

@@ -24,15 +24,23 @@ public:
         return c->forward(cv2->forward(cv1->forward(x)));
     }
 
-    void init_bias(bool is_zeros, int nc, float f)
+    void init_bias(bool b_cv2, int nc, double d_f)
     {
         std::cout << "Detect_2Conv_Conv2d::init_bias ";
         if (this->c->bias.defined())
         {
-            if (is_zeros)
-                c->bias.data().fill_(0);
-            else
-                c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, f);
+            if(b_cv2)
+            {
+                std::cout << "cv2: fill with 1.0\n";
+                c->bias.data().fill_(1.0);
+            }
+            else{
+                std::cout << "cv3: fill with: " << nc << " " << d_f << std::endl;
+                c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, d_f);
+            }
+        }
+        else{
+            LOG(ERROR) << "Conv2d not define bias.";
         }
         std::cout << " over\n";
     }
@@ -67,15 +75,16 @@ public:
         return c->forward(cv2->forward(dw2->forward(cv1->forward(dw1->forward(x)))));
     }
 
-    void init_bias(bool is_zeros, int nc, float f)
+    void init_bias(bool b_cv2, int nc, double d_f)  // 保持与cv2函数一致，但不管b_cv2的值了
     {
         std::cout << "Detect_cv3_2DWConvConv_Conv2d::init_bias ";
         if (this->c->bias.defined())
         {
-            if (is_zeros)
-                c->bias.data().fill_(0);
-            else
-                c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, f);
+            std::cout << "cv3: fill with: " << nc << " " << d_f << std::endl;            
+            c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, d_f);
+        }
+        else{
+            LOG(ERROR) << "Conv2d not define bias.";
         }
         std::cout << " over. \n";
     }
@@ -306,19 +315,20 @@ void DetectImpl::bias_init()
     for(int i = 0; i < nl; i++)
     {
         auto cv2_any = cv2[i]->as<Detect_2Conv_Conv2d>();
-        cv2_any->init_bias(false, nc, 0.f);
+        cv2_any->init_bias(true, nc, 1.f);
 
-        float s = this->stride[i].item().toFloat();
-        float log_val = std::log(5.0f / nc / std::pow(640.0f / s, 2));
-
+        double s = this->stride[i].item().toDouble();
+        double log_val = std::log(5.0 / nc / std::pow(640.0 / s, 2));
+        //std::cout << "s: " << s << " nc: " << nc << " fill_val: " << log_val << std::endl;
+        printf("s: %d nc: %d fill_val: %lf", int(s), int(nc), log_val);
         if (legacy)
         {
             auto cv3_any = cv3[i]->as<Detect_2Conv_Conv2d>();
-            cv3_any->init_bias(true, nc, log_val);
+            cv3_any->init_bias(false, nc, log_val);
         }
         else {
             auto cv3_any = cv3[i]->as<Detect_cv3_2DWConvConv_Conv2d>();
-            cv3_any->init_bias(true, nc, log_val);
+            cv3_any->init_bias(false, nc, log_val);
         }
     }
 }

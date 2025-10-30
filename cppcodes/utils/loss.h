@@ -111,7 +111,7 @@ public:
     int no;
     int reg_max;
     bool use_dfl;
-    VariantConfigs hyp;
+    VariantConfigs* hyp;
 
     TaskAlignedAssigner assigner{ nullptr };
     BboxLoss bbox_loss{ nullptr };
@@ -121,6 +121,7 @@ private:
     torch::Tensor preprocess(torch::Tensor targets, int batch_size, torch::Tensor scale_tensor);
     torch::Tensor bbox_decode(torch::Tensor anchor_points, torch::Tensor pred_dist);
 
+    bool save_tensor_firsttime = false;
 };
 TORCH_MODULE(v8DetectionLoss);
 

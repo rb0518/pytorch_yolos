@@ -24,7 +24,6 @@ public:
     bool b_showdebug;                   //控制调试信息的显示 
 
     std::string cfgfile;
-    VariantConfigs hyp;
     float gr = 1.0f;
    
     std::vector<std::vector<float>> anchors;
@@ -52,6 +51,12 @@ public:
     int n_maxchannels = 512;
 
     bool legacy = true;
+
+    // 调试开关
+    VariantConfigs* p_args;
+    void set_args_prt(VariantConfigs* _args){
+        p_args = _args;
+    }
 
 public:
     ModelImpl(const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo = false);

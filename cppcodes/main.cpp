@@ -320,7 +320,6 @@ int main(int argc, char* argv[])
                 std::vector<torch::jit::IValue> inputs;
                 inputs.emplace_back(input_tensor);
                 auto jit_outs = jit_model.forward(inputs);
-
                 if(is_segment)
                 {
                     output_tensor = jit_outs.toTuple()->elements()[0].toTensor();    // 保留的目的，如体果是Half模式，这里要调用toFloat从FP16转换到FP32
