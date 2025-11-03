@@ -59,6 +59,9 @@ void ConvImpl::set_params(int in_channels, int number, std::vector<arg_complex>&
         Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]));
     else if (argsize == 4)
         Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]), std::get<int>(args[3]));
+    else if (argsize == 5)  // 2025-11-1 v13
+        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), 
+        std::get<int>(args[2]), std::get<int>(args[3]), std::get<int>(args[4]));
     else
         std::cout << "ConvImpl args number error. \n";
 }
@@ -599,4 +602,37 @@ torch::Tensor ConvTransposeImpl::forward(std::vector<torch::Tensor> x)
     LOG(ERROR) << "This module not accept mult-input";
     return x[0];
 }
-// ------------------ End Conv -----------------------------
+// ------------------ End ConvTransposeImpl -----------------------------
+
+// ------------------- Start DSConv ------------------------
+void DSConvImpl::Init_Modules(int c_in, int c_out, int k, int s, 
+    std::optional<int> p , int d, bool bias)
+{
+    in_ch = c_in;
+    out_ch = c_out;
+    if(p == std::nullopt)
+    {
+        padding = autopad(k, p, d);
+        std::cout << "p == nullopt calc: " << padding << std::endl;
+    }
+    else
+        padding = *p;
+    std::cout << c_in << " " << c_out << " " << s << std::endl;
+    dw = torch::nn::Conv2d(torch::nn::Conv2dOptions(c_in, c_in, k)
+        .stride(s).padding(padding).groups(c_in).bias(bias)
+        );
+    std::cout << " create dw over. \n";
+    pw = torch::nn::Conv2d(torch::nn::Conv2dOptions(c_in, c_out, 1)
+        .stride(1).padding(0).bias(bias)
+        );
+    std::cout << " create pw over. \n";
+    bn = torch::nn::BatchNorm2d(c_out);
+    act = torch::nn::SiLU();   
+    std::cout << "DS init over.\n";
+    register_module("dw", dw);
+    register_module("pw", pw);
+    register_module("bn", bn);
+    register_module("act", act);
+}
+
+// ------------------- End DSConv --------------------------

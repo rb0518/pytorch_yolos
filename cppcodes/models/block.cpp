@@ -263,17 +263,9 @@ torch::Tensor C3k2Impl::forward(torch::Tensor x)
     {
         auto tmp = y[y.size() - 1]; // 取队列最后一个
         if(use_c3k)
-        {
-            auto mi = m[i]->as<C3k>();
-            auto r = mi->forward(tmp);
-            y.emplace_back(r);
-        }
+            y.push_back(m[i]->as<C3k>()->forward(tmp));
         else
-        {
-            auto mi = m[i]->as<Bottleneck>();
-            auto r = mi->forward(tmp);
-            y.emplace_back(r);
-        }
+            y.push_back(m[i]->as<Bottleneck>()->forward(tmp));
     }
     return cv2->forward(torch::cat(y, 1));
 }
@@ -286,25 +278,14 @@ torch::Tensor C3k2Impl::forward(std::vector<torch::Tensor> x)
 
 torch::Tensor C3k2Impl::forward_split(torch::Tensor x)
 {
-    auto y_split = cv1->forward(x).split({ c, c }, 1);
-    std::vector<torch::Tensor> y;
-    y.emplace_back(y_split[0]);
-    y.emplace_back(y_split[1]);
+    auto y = cv1->forward(x).split({ c, c }, 1);
     for (int i = 0; i < number; i++)
     {
         auto tmp = y[y.size() - 1]; // 取队列最后一个
         if (use_c3k)
-        {
-            auto mi = m[i]->as<C3k>();
-            auto r = mi->forward(tmp);
-            y.emplace_back(r);
-        }
+            y.push_back(m[i]->as<C3k>()->forward(tmp));
         else
-        {
-            auto mi = m[i]->as<Bottleneck>();
-            auto r = mi->forward(tmp);
-            y.emplace_back(r);
-        }
+            y.push_back(m[i]->as<Bottleneck>()->forward(tmp));
     }
     return cv2->forward(torch::cat(y, 1));
 }
@@ -537,7 +518,7 @@ void A2C2fImpl::set_params(int in_channels, int number, std::vector<arg_complex>
             std::get<bool>(args[1]), 
             std::get<int>(args[2]));
     } else{
-        std::cout << "Init width 5 args.\n";
+        // std::cout << "Init width 5 args.\n";
         Init_Modules(in_channels, 
             std::get<int>(args[0]), 
             number,
@@ -558,35 +539,34 @@ void A2C2fImpl::Init_Modules(int c1, int c2, int n, bool a2 , int area, bool res
 
     a2_ = a2;
     residual_ = residual;
-
     int c_ = int(float(c2) * e);
-
+    if(c_ % 32 != 0)
+    {
+        LOG(ERROR) << "c_ must be multiple of 32." << c_;
+    }
+    int num_heads = c_ / 32;
     // std::cout << "c1 " << c1 << " c2 " << c2 << " n " << n << " a2 " << a2
     //     << " area: " << area << " residual " << residual << " mlp_r " << mlp_ratio
     //     << " e " << e << " g " << g << " shortcut " << shortcut << "\n";
 
     cv1 = Conv(c1, c_, 1, 1);
     cv2 = Conv((1+n)*c_, c2, 1);
-
     register_module("cv1", cv1);
     register_module("cv2", cv2);
 
     if (a2 && residual)
     {
-        gamma = 0.1f * torch::ones(c2);
-        //gamma.requires_grad_(true);
-        register_parameter("gamma", gamma);
+        gamma = register_parameter("gamma", 0.1f * torch::ones(c2));
+        gamma.requires_grad_(true);
     }
 
     for(int i = 0; i < n ; i++)
     {
         if(a2)
         {
-//            std::cout << "a2 is true " << i << std::endl;
-            m->push_back(A2C2f_2ABlock(c_, c_/32, mlp_ratio, area));
+            m->push_back(A2C2f_2ABlock(c_, num_heads, mlp_ratio, area));
         }
         else{
-//            std::cout << "a2 is false " << i << std::endl;
             m->push_back(C3k(c_, c_, 2, shortcut, g));
         }
     }
@@ -610,17 +590,17 @@ torch::Tensor A2C2fImpl::forward(torch::Tensor x)
 
     for(int i = 0; i < m->size(); i++)
     {
-        if (auto* seqptr = m[i]->as<A2C2f_2ABlock>())
-            y.push_back(seqptr->forward(y.back()));
-        else if (auto* c3kptr = m[i]->as<C3k>())
-            y.push_back(c3kptr->forward(y.back()));
+        if (this->a2_)
+            y.push_back(m[i]->as<A2C2f_2ABlock>()->forward(y[y.size() - 1]));
+        else
+            y.push_back(m[i]->as<C3k>()->forward(y[y.size() - 1]));
     }
     at::Tensor y_cat = cv2->forward(torch::cat(y, 1));
 //    std::cout << " y " << y.size() << " y_cat: " << y_cat.sizes() << std::endl;
     
     if(a2_ && residual_)
     {
-        torch::Tensor ret = (x + this->gamma.view({ -1, gamma.size(0), 1, 1 }) * y_cat);
+        torch::Tensor ret = x + this->gamma.view({ -1, gamma.size(0), 1, 1 }) * y_cat;
         return ret;
     }
     return y_cat;
@@ -705,4 +685,160 @@ torch::Tensor C2PSAImpl::forward(std::vector<torch::Tensor> x)
     LOG(ERROR) << "This module not accept mult-input";
     return x[0];
 }
-//------------------------------ End C2PSA ----------------------------
+//------------------------------ End C2PSAImpl ----------------------------
+
+//============================== Start HyperACEImpl ============================
+void HyperACEImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    if(args.size() != 7)
+    {
+        LOG(ERROR) << "HyperACE need 6 args.";
+        exit(-1);
+    }
+    Init_Modules(in_channels, std::get<int>(args[0]), number,
+        std::get<int>(args[1]),
+        std::get<bool>(args[2]),
+        std::get<bool>(args[3]),
+        std::get<float>(args[4]),
+        std::get<float>(args[5]),  // yolov13.yaml 配置不对，这里与其python代码不清
+        std::get<std::string>(args[6])
+    );
+}
+torch::Tensor HyperACEImpl::forward(std::vector<torch::Tensor> x)
+{
+    auto x_fuse = fuse->forward(x);
+    auto y = cv1->forward(x_fuse).chunk(3, 1);
+    auto out1 = branch1->forward(y[1]);
+    auto out2 = branch2->forward(y[1]);
+
+    for (int i = 0; i < m->size(); i++)
+    {
+        if (b_use_dsc3k)
+            y.push_back(m[i]->as<DSC3k>()->forward(y[y.size() - 1]));
+        else
+            y.push_back(m[i]->as<DSBottleneck>()->forward(y[y.size() - 1]));
+
+    }
+    y[1] = out1;
+    y.push_back(out2);
+    
+    return cv2->forward(torch::cat(y, 1));       
+}
+torch::Tensor HyperACEImpl::forward(torch::Tensor x) {
+    LOG(ERROR) << "not support vector input.";
+    return x[0];
+}
+
+void HyperACEImpl::Init_Modules(int c1, int c2, int n, int num_hyperedges, 
+    bool dsc3k,
+    bool shortcut,
+    float e1, float e2, std::string context , bool channel_adjust)
+{
+    in_ch = c1;
+    out_ch = c2;
+    b_use_dsc3k = dsc3k;
+    int c = int(float(c2) * e1);
+    this->cv1 = Conv(c1, 3 * c, 1, 1);
+    this->cv2 = Conv((4 + n) * c, c2, 1);
+
+    for (int i = 0; i < n; i++)
+    {
+        if (dsc3k)
+        {
+            /*
+            DSC3kImpl(int c1, int c2, int n = 1, bool shortcut = true, int g = 1,
+                float e = 0.5, int k1 = 3, int k2 = 5, int d2 = 1)            */
+            m->push_back(DSC3k(c, c, 2, shortcut, 1, 0.5, 3, 7));
+        }else{
+            m->push_back(DSBottleneck(c, c, shortcut));
+        }
+    }
+    fuse = FuseModule(c1, channel_adjust);
+    branch1 = C3AH(c, c, e2, num_hyperedges, context);
+    branch2 = C3AH(c, c, e2, num_hyperedges, context);
+
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+    register_module("m", m);
+    register_module("fuse", fuse);
+    register_module("branch1", branch1);
+    register_module("branch2", branch2);
+}
+//------------------------------ End HyperACEImpl ----------------------------
+
+//=============================== Start DownsampleConv ========================
+void DownsampleConvImpl::Init_Modules(int in_channels, bool _channel_adjust)
+{
+    in_ch = in_channels;
+    out_ch = in_channels * 2;
+    if(false == _channel_adjust)
+        out_ch = in_channels;
+    b_channel_adjust = _channel_adjust;
+    downsample = torch::nn::AvgPool2d(torch::nn::AvgPool2dOptions({2, 2}));
+    register_module("downsample", downsample);
+
+    if(b_channel_adjust)
+    {
+        channel_adjust = Conv(in_channels, in_channels * 2, 1);
+        register_module("channel_adjust", channel_adjust);
+    }
+    
+}
+
+torch::Tensor DownsampleConvImpl::forward(std::vector<torch::Tensor> x){
+    LOG(ERROR) << "DownsampleConvImpl not support vector input";
+    return x[0];
+}
+torch::Tensor DownsampleConvImpl::forward(torch::Tensor x)
+{
+    if (false == b_channel_adjust)
+        return downsample->forward(x);
+    return channel_adjust->forward(downsample->forward(x));
+}
+//-------------------------------- End DownsampleConv -----------------------------
+
+//=============================== Start DSC3k2 ========================
+void DSC3k2Impl::Init_Modules(int c1, int c2, int n /*= 1*/,
+    bool _dsc3k /*= false*/, float e/* = 0.5*/,
+    int g /*= 1*/, bool shortcut /*= true*/,
+    int k1/* = 3*/, int k2/* = 7*/, int d2 /*= 1*/)
+{
+    in_ch = c1;
+    out_ch = c2;
+    b_dsc3k = _dsc3k;
+    int c = int(float(c2) * e);
+    cv1 = Conv(c1, 2 * c, 1, 1);
+    cv2 = Conv((2 + n) * c, c2, 1);
+    for (int i = 0; i < n; i++)
+    {
+        if (_dsc3k)
+        {
+            /*
+            DSC3kImpl(int c1, int c2, int n = 1, bool shortcut = true, int g = 1,
+                float e = 0.5, int k1 = 3, int k2 = 5, int d2 = 1)
+            */
+            m->push_back(DSC3k(c, c, 2, shortcut, g, 1.0, k1, k2, d2));
+        }else{
+            m->push_back(DSBottleneck(c, c, shortcut, 1.0, k1, k2, d2));
+        }
+    }
+
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+    register_module("m", m);
+}
+
+torch::Tensor DSC3k2Impl::forward(torch::Tensor x)
+{
+    auto y = cv1->forward(x).chunk(2, 1);
+    for (int i = 0; i < m->size(); i++)
+    {
+        if (b_dsc3k)
+            y.push_back(m[i]->as<DSC3k>()->forward(y[y.size() - 1]));
+        else
+            y.push_back(m[i]->as<DSBottleneck>()->forward(y[y.size() - 1]));
+    }
+    return cv2->forward(torch::cat(y, 1));
+}
+
+//-------------------------------- End DSC3k2 -----------------------------

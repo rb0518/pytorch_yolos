@@ -105,15 +105,15 @@ DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
     no = nc + reg_max * 4;  // number of ouputs per anchors
     stride = torch::zeros({nl});
 
-    //std::cout << "ch: [ " << _ch[0] <<" " << _ch[1] << " " << _ch[2] << " ]\n";
+    std::cout << "ch: [ " << _ch[0] <<" " << _ch[1] << " " << _ch[2] << " ]\n";
     c2 = std::max(16, std::max(_ch[0] / 4, reg_max * 4));
     c3 = std::max(_ch[0], std::min(nc, 100));
 
-    //std::cout << "c2: " << c2 << " c3: " << c3 << std::endl;
+    std::cout << "c2: " << c2 << " c3: " << c3 << std::endl;
     for(int i = 0; i < _ch.size(); i++)
     {
         auto x = _ch[i];
-        //std::cout << " x : _ch: " << x << " c2 " << c2 << " c3: " << c3 << std::endl;
+        std::cout << " x : _ch: " << x << " c2 " << c2 << " c3: " << c3 << std::endl;
         cv2->push_back(Detect_2Conv_Conv2d(x, c2, 4* reg_max));
 
         if(legacy)
@@ -151,7 +151,7 @@ DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
         register_module("one2one_cv2", one2one_cv2);
         register_module("one2one_cv3", one2one_cv3);
     }
-    //std::cout << "DetectImpl init ok \n";
+    std::cout << "DetectImpl init ok \n";
 }
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>>

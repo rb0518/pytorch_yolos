@@ -6,15 +6,22 @@ LambdaLR::LambdaLR(std::shared_ptr<torch::optim::Optimizer> optimizer,
     int step_size,
     bool linear_lr,
     int last_step)
-    : LRScheduler(*optimizer), y1(start), y2(end), step_size_(step_size), linear_lr_(linear_lr),
+    : LRScheduler(*optimizer), y1(double(start)), y2(double(end)), step_size_(step_size), linear_lr_(linear_lr),
     last_step_(last_step), _optimizer(optimizer)
 {
     initial_lrs = get_current_lrs();
+
+    std::cout << "LambdaLR init: \n";
+    for (int i = 0; i < initial_lrs.size(); i++)
+    {
+        std::cout << i << " " << initial_lrs[i] << " ";
+    }
+    std::cout << "\n";
 }
 
 std::vector<double> LambdaLR::get_lrs()
 {
-    last_step_ = std::max(0, last_step_ + 1);
+    last_step_ = std::max(0.0001, last_step_ + 1);
     cur_lrs = get_current_lrs();
     for (int i = 0; i < cur_lrs.size(); i++)
     {

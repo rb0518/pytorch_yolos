@@ -95,3 +95,6 @@ cmake ..
 
 * 2025-10-28 
   根据`ultralytics`代码，增加代码，能够解释v5, v11, v12版本的yaml文件，但v8DetectionLoss中cls损失函数异常，比pytorch原代码大了约2000倍，训练不收敛，检查了代码，暂时未发现问题所在。尝试调用yolov11n.pt(自己在原代码中添加，在model.train()后调用jit.trace()函数转换，不要在eval下转换)，模型训练收敛，同时预测输出正确。要不在init_weight等地方还有丢失步骤，要不v8Detection中还有错误未发现
+
+2025-11-3
+  根据[iMoonLab](https://github.com/iMoonLab/yolov13)的Python代码，添加了支持`iMoonLab`v13版本相关代码，测试网络初始化和训练跑完整流程没有报错。但跟前面v5、v11、v12版本一样，在`coco128`数据集上训练，并没有像官方版本一样，快速收敛，Bug依然存在，后续继续排查。

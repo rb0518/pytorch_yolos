@@ -117,7 +117,7 @@ int main(int argc, char* argv[])
         auto [name_ok, version, scale, task] = parse_yolo_config(std::filesystem::path(FLAGS_cfg).filename().string());
         if(name_ok)
         {
-            if(version != 5 && version != 11 && version != 12)
+            if(version != 5 && version != 11 && version != 12 && version !=13)
             {
                 LOG(ERROR) << "only complete support v5, v11, v12.";
                 exit(-1);

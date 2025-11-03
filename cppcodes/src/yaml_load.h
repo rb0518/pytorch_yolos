@@ -66,12 +66,17 @@ typedef struct tagYoloLayerDef
         
         std::stringstream ss_args;
         ss_args << "args: ";
-        for(auto item : args) 
+        if(args.size())
         {
-            std::visit([&](auto&& arg){
-                ss_args << " " << arg;
-            }, item);
+            for(auto item : args) 
+            {
+                std::visit([&](auto&& arg){
+                    ss_args << " " << arg;
+                }, item);
+            }
         }
+        else
+            ss_args << "[]";
         ss << std::setw(35) << ss_args.str();
         
         return ss.str();

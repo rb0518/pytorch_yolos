@@ -221,7 +221,7 @@ BaseTrainer::BaseTrainer(std::string _root, VariantConfigs cfg_default)
     show_cfg_info("BaseTrainer cfg: ", args);
     init_device();
 
-    //init_torch_seek(std::get<int>(args["seed"]));
+    init_torch_seek(std::get<int>(args["seed"]));
     task_name = std::get<std::string>(args["task"]);
     std::cout << ColorString("Task: ") << task_name << std::endl;
 
@@ -327,13 +327,9 @@ void BaseTrainer::setup_model()
     }
     auto imgsz = std::get<int>(args["imgsz"]);
     model = Model(cfg_file, 80, imgsz, imgsz, 3);
-    if (model.is_empty())
-    {
-        LOG(ERROR) << "Create model error.";
-        exit(-1);
-    }
-
+    std::cout << "Model create in trainbase over.\n";
     model->set_args_prt(&args); // 传递指针，适应全局变量需要
+    std::cout << "Model set args over.\n";
 
     model->show_modelinfo();
     model->to(device);
@@ -407,8 +403,8 @@ void BaseTrainer::setup_optimizer()
 
 
     build_optiomizer(model->n_classes, name, lr, momentum, weight_decay, iterations);
-    if(name == "auto")
-        args["warmup_bias_lr"] = 0.0f;
+   if(name == "auto")
+       args["warmup_bias_lr"] = 0.0f;
 }
 
 void BaseTrainer::build_optiomizer(int nc,std::string optim_name, 
@@ -568,7 +564,7 @@ void BaseTrainer::build_optiomizer(int nc,std::string optim_name,
 
 void BaseTrainer::setup_scheduler()
 {
-    bool is_linear = std::get<bool>(args["cos_lr"]) != true;
+    bool is_linear = std::get<bool>(args["cos_lr"]) == false;
     float lrf = std::get<float>(args["lrf"]);
     int epochs = std::get<int>(args["epochs"]);
     scheduler = std::make_shared<LambdaLR>(optimizer, 1.0f, lrf, epochs, is_linear);
@@ -611,15 +607,20 @@ void BaseTrainer::do_train()
         nw = std::max(warmup_epochs * nb, 100); // 
 
     int base_epochs = epochs - std::get<int>(args["close_mosaic"]);
-    optimizer->zero_grad();
     int ni = 0;
     std::shared_ptr<v8DetectionLossImpl> compute_loss = std::make_shared<v8DetectionLossImpl>(model.ptr());
 
     std::cout << ColorString("Start training:") << ", start_epoch: " << start_epochs <<" end epochs: " << epochs << " number of batch: " << nb << std::endl;
-
+    optimizer->zero_grad();
     for (int epoch = start_epochs; epoch < epochs; epoch++)
     {
         train_loader->cloase_mosaic(epoch >= base_epochs);       
+
+        // 调试代码
+        // for (size_t j = 0; j < optimizer->param_groups().size(); j++)
+        // {
+        //     printf("pg%d lr: %lf\n", int(j), optimizer->param_groups()[j].options().get_lr());
+        // }
 
         scheduler->step();
         model->train();
@@ -639,6 +640,7 @@ void BaseTrainer::do_train()
 
             if (ni <= nw)
                 do_warmup(epoch, ni, nw, nbs, train_loader->get_batch_size());
+
             #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
             if(std::get<bool>(args["use_unified_batch"]))
             {
@@ -656,10 +658,10 @@ void BaseTrainer::do_train()
                 save_batch_sample_image(epoch, base_epochs, start_epochs, prepro_data[0], prepro_data[1]);
             
             torch::Tensor loss, loss_items;
-
+            auto input_tensor = prepro_data[0].to(device, true);
             {   // {}是来限定 set_autocast_enabled（） 的作用域范围
                 at::autocast::set_autocast_enabled(torch::kCUDA, true);
-                auto [pred_t, train_v, mask_t] = model->forward(prepro_data[0].to(device));
+                auto [pred_t, train_v, mask_t] = model->forward(input_tensor);
 
                 std::tie(loss, loss_items) = compute_loss->forward(train_v, batch);
             }
@@ -671,12 +673,17 @@ void BaseTrainer::do_train()
                 optimizer->zero_grad();
                 last_opt_step = ni;
             }
+            auto vc_lrs = scheduler->get_curstep_lrs();
+            char temp_str[200];
+            sprintf(temp_str, "lr0: %lf lr1: %lf lr2: %lf", vc_lrs[0], vc_lrs[1], vc_lrs[2]);
 
-            pbar.set_prefix(refresh_batch_end_info(epoch, epochs, idx_epoch, num_targets, mloss, loss_items));
+
+            pbar.set_suffix(std::string(temp_str));
+            pbar.set_prefix(refresh_batch_end_info(epoch, epochs, idx_epoch, num_targets, loss,  mloss, loss_items));
             idx_epoch+=1;
             pbar.update();
         }
-        scheduler->step();
+        //scheduler->step(); 做了两次
         std::cout << std::endl;
 
         on_train_epoch_over(epoch);
@@ -728,7 +735,7 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
 
     for (size_t j = 0; j < optimizer->param_groups().size(); j++)
     {
-        float start_lr = (j == 2) ? std::get<float>(args["warmup_bias_lr"]) : 0.0f;
+        float start_lr = (j == 0) ? std::get<float>(args["warmup_bias_lr"]) : 0.0f;
         float end_lr = std::get<float>(args["lr0"]) * lr_lambda(epoch);     // python原代码中x["initial_lr"] C++中没有找到
         std::vector<float> fp = { start_lr, end_lr };
         optimizer->param_groups()[j].options().set_lr(double(linear_interp(float(ni), xi, fp)));
@@ -746,18 +753,24 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
 
             if (auto sgd_options = dynamic_cast<torch::optim::SGDOptions*>(&options))
             {
+                std::cout << "init as sgd. \n";
                 sgd_options->momentum(m);
             }
+            /*
             else if (auto adamw_options = dynamic_cast<torch::optim::AdamWOptions*>(&options))
             {
+                std::cout << "init as adamw. \n";
                 adamw_options->betas(std::make_tuple(m, 0.999));
             }
             else if (auto adam_options = dynamic_cast<torch::optim::AdamOptions*>(&options))
             {
+                std::cout << "init as adam. \n";
                 adam_options->betas(std::make_tuple(m, 0.999));
             }
+            */
             else if (auto rmsprop_options = dynamic_cast<torch::optim::RMSpropOptions*>(&options))
             {
+                std::cout << "init as RMSProp.\n";
                 rmsprop_options->momentum(m);
             }
         }
@@ -765,12 +778,13 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
 }
 
 std::string BaseTrainer::refresh_batch_end_info(int epoch, int epochs, int idx, int num_targets,
-		torch::Tensor& mloss, torch::Tensor& loss_items)
+	torch::Tensor& loss, torch::Tensor& mloss, torch::Tensor& loss_items)
 {
     mloss.to(loss_items.device());
     mloss = (mloss * idx + loss_items) / float(idx + 1);
     char temp_cstr[120];
-    sprintf(temp_cstr, "%4d-%-4d%7d%15.5f%15.5f%15.5f%6d", (epoch+1), epochs, idx,
+    sprintf(temp_cstr, "%4d-%-4d%7d%10.5f %10.5f %10.5f %10.5f%6d", (epoch+1), epochs, idx,
+        loss.item().toFloat(),
         mloss[0].item().toFloat(),
         mloss[1].item().toFloat(),
         mloss[2].item().toFloat(),

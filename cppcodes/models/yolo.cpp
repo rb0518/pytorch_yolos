@@ -51,7 +51,11 @@ std::vector<std::string> base_modules = {
         "PSA", 
         "SCDown", 
         "C2fCIB", 
-        "A2C2f"
+        "A2C2f",
+
+        "DSC3k2",       // V13
+        "HyperACE",
+        "DSConv"
     };
 
 bool isInVector(const std::vector<std::string>& vec, const std::string& str) 
@@ -94,6 +98,13 @@ std::shared_ptr<BaseModule> createObject(const std::string& className) {
         factories["C3k2"] = []() { return std::make_shared<C3k2Impl>(); };
         factories["A2C2f"] = []() { return std::make_shared<A2C2fImpl>(); };
         factories["C2PSA"] = []() { return std::make_shared<C2PSAImpl>(); };
+
+        // 2025-11-1 add for v13      
+        factories["DSConv"] = []() { return std::make_shared<DSConvImpl>(); };
+        factories["HyperACE"] = []() { return std::make_shared<HyperACEImpl>(); };
+        factories["DownsampleConv"] = []() { return std::make_shared<DownsampleConvImpl>(); };
+        factories["FullPAD_Tunnel"] = []() { return std::make_shared<FullPAD_TunnelImpl>(); };
+        factories["DSC3k2"] = []() { return std::make_shared<DSC3k2Impl>(); };
     }
 
     auto it = factories.find(className);
@@ -216,9 +227,15 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
             for(auto item : layer_froms[i])
             {
                 if(item < 0)    
+                {
+                    // std::cout << "form :" << item << std::endl;
                     tmp.push_back(layer_outputs[i+item]);
+                }
                 else
+                {
+                    // std::cout << "form :" << item << std::endl;
                     tmp.push_back(layer_outputs[item]);
+                }
             }
 
             if(tmp.size() == 1)
@@ -226,7 +243,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
             else
                 layer_outputs.push_back(module_layers[i]->forward(tmp));
         }
-        //std::cout << "layer_id: "<< std::setw(5) << i << std::setw(20) << layer_cfgs[i].name << " " << layer_outputs[i].sizes() << std::endl;
+//        std::cout << "layer_id: "<< std::setw(5) << i << std::setw(20) << layer_cfgs[i].name << " " << layer_outputs[i].sizes() << std::endl;
     }
 
 
@@ -350,18 +367,32 @@ void ModelImpl::readconfigs(const std::string& yaml_file, std::string scale_id /
 
         layer.number = cfgs[1].as<int>();
         layer.name = cfgs[2].as<std::string>();
-        // if(layer.name == "SPP")
-        //     std::cout << cfgs[3] << std::endl;
-        for(auto e : cfgs[3])
+
+        if(layer.name == "DownsampleConv" || layer.name == "FullPAD_Tunnel")
         {
-            if(e.IsSequence())  // 针对SPP中第二参数为数组，修正
+            std::cout << cfgs[3] << std::endl;
+            layer.add_one_arg("None");
+        }
+        else
+        {
+            for(auto e : cfgs[3])
             {
-                std::stringstream temp;
-                temp << e.as<std::vector<float>>();
-                layer.add_one_arg(temp.str());
+                if(e.IsSequence())  // 针对SPP中第二参数为数组，修正
+                {
+                    std::stringstream temp;
+                    temp << e.as<std::vector<float>>();
+                    layer.add_one_arg(temp.str());
+                }
+                else if(e.as<std::string>()!="")
+                {
+                    layer.add_one_arg(e.as<std::string>());
+                }
+                else
+                {
+                    std::cout << "read yaml return empty string" << std::endl;
+                    layer.add_one_arg("None");
+                }
             }
-            else
-                layer.add_one_arg(e.as<std::string>());
         }
         return layer;
     };
@@ -391,11 +422,13 @@ void ModelImpl::create_modules()
     module_layers.resize(layer_cfgs.size()-1);    // Detect Segment单独构造
     for (int i = 0; i < layer_cfgs.size() - 1; i++)
     {
-        //std::cout << "\n create layer " << i << " " << layer_cfgs[i].name;
+        //std::cout << "\n create layer " << i << " " << layer_cfgs[i].name << std::endl;
         int ch_in = i == 0 ? this->n_channels : layer_out_chs[i - 1];
+        if(layer_cfgs[i].froms[0] > 0)  // v13版本中的配置里，除-1, []之外，还有单个不为-1的变量
+            ch_in =  layer_out_chs[layer_cfgs[i].froms[0]];
         layer_froms.push_back(layer_cfgs[i].froms);
         int n = calculate_depth_gain(layer_cfgs[i].number, depth_multiple);
-
+        //std::cout << "init calc depth gain: " << n << std::endl;
         if(isInVector(base_modules, layer_cfgs[i].name))
         {
             int c2 = std::get<int>(layer_cfgs[i].args[0]);
@@ -407,7 +440,7 @@ void ModelImpl::create_modules()
             }
             layer_cfgs[i].args[0] = c2;
 
-            if(layer_cfgs[i].name == "C3k2")
+            if(layer_cfgs[i].name == "C3k2" ||layer_cfgs[i].name =="DSC3k2")
             {
                 legacy = false;
                 if(scales_key[scale_id] >= scales_key["m"])
@@ -423,15 +456,59 @@ void ModelImpl::create_modules()
                 /*
                     if scale in "lx":  # for L/X sizes
                         args.extend((True, 1.2))
+                    # https://github.com/iMoonLab/yolov13   
+                    if m is A2C2f: 
+                        legacy = False
+                        if scale in "lx":  # for L/X sizes
+                            args.append(True)
+                            args.append(1.5) 
                 */
                 if(scales_key[scale_id] >= scales_key["l"])
                 {
-                    std::cout << "A2C2f: " << scale_id << " add args [3] & [4] ";                    
                     layer_cfgs[i].args[3] = true;
-                    layer_cfgs[i].args[4] = 1.2f;
+                    layer_cfgs[i].args[4] = 1.5f;
                 }
             }
+            if(layer_cfgs[i].name == "HyperACE")
+            {
+                ch_in = layer_out_chs[layer_cfgs[i].froms[1]];
+                int c2 = std::get<int>(layer_cfgs[i].args[0]);
+                int he = std::get<int>(layer_cfgs[i].args[1]);
+                if(scales_key[scale_id] == scales_key["n"])
+                {
+                    he = he * 0.5;
+                }
+                else if(scales_key[scale_id] == scales_key["x"])
+                {
+                    he = he * 1.5;
+                }
+                layer_cfgs[i].args[1] = he;
+                if(scales_key[scale_id] >= scales_key["l"])
+                {
+                    layer_cfgs[i].args.push_back(false);
+                }
+            }
+
         }
+        else
+        {
+            if(layer_cfgs[i].name == "DownsampleConv")
+            {
+                layer_cfgs[i].args[0] = true;   //将前面补的[nodefine] ==> [true]
+                if(scales_key[scale_id] >= scales_key["l"])
+                {
+                    layer_cfgs[i].args[0] = false;
+                }
+            }
+            else if(layer_cfgs[i].name == "FullPAD_Tunnel")
+            {
+                ch_in = layer_out_chs[layer_cfgs[i].froms[1]];  
+            }
+            else if(layer_cfgs[i].name == "Concat")
+            {
+            }
+        }
+
         // 根据layer_cfgs[i].name, 生成对应的Module，并压入vector中
         module_layers[i] = createObject(layer_cfgs[i].name);
         module_layers[i]->set_params(ch_in, 
@@ -450,13 +527,14 @@ void ModelImpl::create_modules()
                 {
                     total_out_ch += layer_out_chs[(i+j)];
                 }
-                    
                 else
+                {
                     total_out_ch += layer_out_chs[j];
+                }
             }
         }
         layer_out_chs.push_back(total_out_ch);            
-        //std::cout << "Layer: " << i << " " << layer_cfgs[i].name << " channels in: " << ch_in << " out:" << layer_out_chs[i] << std::endl;
+//        std::cout << "Layer: " << i << " " << layer_cfgs[i].name << " channels in: " << ch_in << " out:" << layer_out_chs[i] << std::endl;
     }
     // 构造 最后一层的 Detect/Segment
     YoloLayerDef final_layercfgs = layer_cfgs[layer_cfgs.size()-1];
@@ -464,7 +542,10 @@ void ModelImpl::create_modules()
 
     std::vector<int> inchannels;
     for(auto item : final_layercfgs.froms)
+    {
         inchannels.push_back(layer_out_chs[item]);
+        std::cout << "Detect from: " << layer_out_chs[item] << std::endl;
+    }    
 
     if(final_layercfgs.name == "Detect") 
     {
@@ -492,6 +573,7 @@ void ModelImpl::initialize_weights()
 {
     for (auto& submodule : this->modules(false))
     {
+        std::cout << submodule->name() << std::endl;
         if (submodule->name() == "torch::nn::Conv2dImpl") {
             // Kaiming初始化被注释掉
             // torch::nn::init::kaiming_uniform_(submodule->as<torch::nn::Conv2d>()->weight);
@@ -502,17 +584,21 @@ void ModelImpl::initialize_weights()
         }
         else if (submodule->name() == "torch::nn::BatchNorm2dImpl") {
             //std::cout << "find module: " << submodule->name() << std::endl;
-            submodule->as<torch::nn::BatchNorm2d>()->options.eps(1e-3);
-            submodule->as<torch::nn::BatchNorm2d>()->options.momentum(0.03);
+            submodule->as<torch::nn::BatchNorm2dImpl>()->options.eps(1e-3);
+            submodule->as<torch::nn::BatchNorm2dImpl>()->options.momentum(0.03);
         }
         else if (submodule->name() == "torch::nn::LeakyReLUImpl") {
             submodule->as<torch::nn::LeakyReLU>()->options.inplace(true);
         }
-        else if (auto act = submodule->as<torch::nn::ReLU>()) {
+        else if (submodule->name() == "torch::nn::ReLUImpl") {
             submodule->as<torch::nn::ReLU>()->options.inplace(true);
         }
-        else if (auto act = submodule->as<torch::nn::ReLU6>()) {
+        else if (submodule->name() == "torch::nn::ReLU6") {
             submodule->as<torch::nn::ReLU6>()->options.inplace(true);
+        }
+        else if (auto act = submodule->as<torch::nn::SiLUImpl>())
+        {   // libtorch SiLU中没有对应的options成员变量
+            //submodule->as<torch::nn::SiLUImpl>()->options.inplace(true);  
         }
     }
 }

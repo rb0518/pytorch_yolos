@@ -15,6 +15,8 @@
     "CBAM",                 [√]
     "Concat",               [√]
     "RepConv",                      暂时只有rtdetr.yaml中RepC3和RepBottleneck会用到
+    "Index"
+    "DSConv"                [√]
 */
 
 
@@ -415,3 +417,60 @@ public:
     SpatialAttention spatial_attention{nullptr};
 };
 TORCH_MODULE(CBAM);
+
+// 2025-10-31 Add for v13
+/*
+    """The Basic Depthwise Separable Convolution."""
+*/
+class DSConvImpl : public BaseModule
+{
+   // def __init__(self, c_in, c_out, k=3, s=1, p=None, d=1, bias=False):
+public:
+    DSConvImpl(){};
+    ~DSConvImpl(){};
+    explicit DSConvImpl(int c_in, int c_out, int k = 3, int s = 1, 
+        std::optional<int> p = std::nullopt, int d = 1, bool bias = false)
+        {
+            Init_Modules(c_in, c_out, k, s, p, d, bias);
+        }
+    
+    void set_params(int inchannels, int number, std::vector<arg_complex>& args)
+    {
+        int args_cout = args.size();
+        if(args_cout == 3)
+        {
+            Init_Modules(inchannels, std::get<int>(args[0]),
+                        std::get<int>(args[1]),
+                        std::get<int>(args[2]) );
+        }
+        else{
+            LOG(ERROR) << "number of DWConv args wrong: " << args_cout;
+            Init_Modules(inchannels, std::get<int>(args[0]));
+        }
+    }
+    // 简化下转参数的适应性，后续再修改
+    torch::Tensor forward(std::vector<torch::Tensor> x) 
+    {
+        LOG(ERROR) << "Not support.";
+        return x[0];
+    }
+    torch::Tensor forward(torch::Tensor x) 
+    {
+        return act->forward(bn->forward(pw->forward(dw->forward(x))));
+    };
+    int get_outchannels() override {return out_ch;} ;
+public:
+    int in_ch;
+    int out_ch;
+    int k_size;
+    int stride;
+    int padding;
+    
+    void Init_Modules(int c_in, int c_out, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int d = 1, bool bias = false);
+    torch::nn::Conv2d dw{ nullptr };
+    torch::nn::Conv2d pw{ nullptr };
+
+    torch::nn::BatchNorm2d bn{ nullptr };
+    torch::nn::SiLU act{nullptr};
+};
+TORCH_MODULE(DSConv);

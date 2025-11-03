@@ -24,11 +24,11 @@ public:
 private:
     std::vector<double> get_lrs() override;
 
-    float y1;
-    float y2;
+    double y1;
+    double y2;
     bool linear_lr_;
-    int step_size_;
-    int last_step_;
+    double step_size_;
+    double last_step_;
 
     std::vector<double> initial_lrs;
     std::vector<double> cur_lrs;

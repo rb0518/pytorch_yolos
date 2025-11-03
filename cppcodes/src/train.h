@@ -31,7 +31,7 @@ public:
 	void do_warmup(int epoch, int ni, int nw, int nbs, int batch_size);
 
 	virtual std::string refresh_batch_end_info(int epoch, int epochs, int idx, int num_targets,
-		torch::Tensor& mloss, torch::Tensor& loss_items);
+		torch::Tensor& loss, torch::Tensor& mloss, torch::Tensor& loss_items);
 	virtual void on_train_epoch_over(int epoch);
 	virtual void save_model() {};
 	virtual void load_model() {};

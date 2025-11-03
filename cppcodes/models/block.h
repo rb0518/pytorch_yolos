@@ -42,7 +42,12 @@
     "SCDown",
     "TorchVision",
 
-    A2C2f                   [√]     Yolov12   ABlock AAttn
+    "A2C2f"                 [√]     Yolov12   ABlock AAttn
+
+    "HyperACE",             [√] 
+    "DownsampleConv",       [√]  
+    "FullPAD_Tunnel",       [√] 
+    "DSC3k2"                
 */
 
 
@@ -417,8 +422,8 @@ public:
         head_dim = h_dim;
         int all_head_dim = h_dim * num_heads;
 
-        qkv_cv = Conv(_dim, all_head_dim * 3, 1, 1, -1, 1, 1, "False");
-        proj_cv = Conv(all_head_dim, _dim, 1, 1, -1, 1, 1, "False");
+        qkv_cv = Conv(_dim, all_head_dim * 3, 1, 1, std::nullopt, 1, 1, "False");
+        proj_cv = Conv(all_head_dim, _dim, 1, 1, std::nullopt, 1, 1, "False");
         pe_cv = Conv(all_head_dim, _dim, 7, 1, 3, _dim, 1, "False");
         register_module("qkv", qkv_cv);
         register_module("proj", proj_cv);
@@ -450,23 +455,23 @@ public:
 
         auto attn = (q.transpose(-2, -1).matmul(k)) * std::pow(float(head_dim), -0.5f);
         attn = attn.softmax(-1);
-        auto ret_x = v.matmul(attn.transpose(-2, -1));
-        ret_x = ret_x.permute({ 0, 3, 1, 2 });
+        x = v.matmul(attn.transpose(-2, -1));
+        x = x.permute({ 0, 3, 1, 2 });
         v = v.permute({ 0, 3, 1, 2 });
 
         if (area > 1)
         {
             auto B_area = static_cast<int>(std::trunc(float(B) / float(area)));
-            ret_x = ret_x.reshape({ B_area, int(N * area), C});
+            x = x.reshape({ B_area, int(N * area), C});
             v = v.reshape({ B_area, int(N * area), C });
-            B = ret_x.size(0);
-            N = ret_x.size(1);
+            B = x.size(0);
+            N = x.size(1);
         }
 
-        ret_x = ret_x.reshape({ B, H, W, C }).permute({ 0, 3, 1, 2 }).contiguous();
+        x = x.reshape({ B, H, W, C }).permute({ 0, 3, 1, 2 }).contiguous();
         v = v.reshape({ B, H, W, C }).permute({ 0, 3, 1, 2 }).contiguous();
-        ret_x = ret_x + pe_cv->forward(v);
-        return proj_cv->forward(ret_x);
+        x = x + pe_cv->forward(v);
+        return proj_cv->forward(x);
     }
 
 public:
@@ -488,8 +493,8 @@ class ABlockImpl : public torch::nn::Module
 public:
     ABlockImpl(int dim, int num_heads, float mlp_ratio = 1.2, int area = 1)
     {
-        // std::cout << "ABlock input dim: " << dim << " num_heads: " << num_heads
-        //     << " ratio: " << mlp_ratio << " area: " << area << "\n";
+        //  std::cout << "ABlock input dim: " << dim << " num_heads: " << num_heads
+        //      << " ratio: " << mlp_ratio << " area: " << area << "\n";
 
         attn = AAttn(dim, num_heads, area);
         mlp_hidden_dim = int(float(dim) * mlp_ratio);
@@ -500,9 +505,8 @@ public:
         */
 
         mlp_0 = Conv(dim, mlp_hidden_dim, 1);
-        mlp_1 = Conv(mlp_hidden_dim, dim, 1, 1, -1, 1, 1, "False"); 
+        mlp_1 = Conv(mlp_hidden_dim, dim, 1, 1, std::nullopt, 1, 1, "False"); 
         register_module("attn", attn);
-        //register_module("mpl", mlp);
         register_module("mlp-0", mlp_0);
         register_module("mlp-1", mlp_1);
 
@@ -514,28 +518,40 @@ public:
 
     torch::Tensor forward(torch::Tensor x)
     {
-        auto y = x + attn->forward(x);
-        return y + mlp_1->forward(mlp_0->forward(y));
+        x = x + attn->forward(x);
+        return x + mlp_1->forward(mlp_0->forward(x));
     }
 
-    void truncated_normal_(torch::Tensor& tensor, float mean=0, float std=0.02) 
-    {
-        auto normal_tensor = torch::randn_like(tensor).mul_(std).add_(mean);
-        auto mask = (normal_tensor < 2) & (normal_tensor > -2);
-        tensor.copy_(normal_tensor.masked_fill_(~mask, 0));
-    }
 
+    /*
+        """
+        Initialize weights using a truncated normal distribution.
+
+        Args:
+            m (nn.Module): Module to initialize.
+        """
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    */
     void init_weights(torch::nn::Module& module) 
     {
         if (auto* conv = module.as<torch::nn::Conv2d>()) {
-            torch::nn::init::normal_(conv->weight, 0.0f, 0.2f);
+            torch::nn::init::normal_(conv->weight, 0.0, 0.02);
+            conv->weight.data().clamp_(-2.0, 2.0);
             if (conv->bias.defined()) 
-                torch::nn::init::zeros_(conv->bias);
-        }
-        else if (auto* bn = module.as<torch::nn::BatchNorm2d>()) {
-            torch::nn::init::ones_(bn->weight);
-            torch::nn::init::zeros_(bn->bias);
-        }
+            {
+                torch::nn::init::constant_(conv->bias, 0);
+            }
+            else
+                std::cout << "conv bias not defined.\n";
+
+        } //原代码只初始化了nn.Conv2d
+        // else if (auto* bn = module.as<torch::nn::BatchNorm2d>()) {
+        //     torch::nn::init::ones_(bn->weight);
+        //     torch::nn::init::zeros_(bn->bias);
+        // }
     }
 
 public:
@@ -766,3 +782,764 @@ private:
 
 };
 TORCH_MODULE(C2PSA);
+
+// 2025-10-31 Add for v13
+
+/*
+    """
+    An improved bottleneck block using depthwise separable convolutions (DSConv).
+
+    This class implements a lightweight bottleneck module that replaces standard convolutions with depthwise
+    separable convolutions to reduce parameters and computational cost.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        shortcut (bool, optional): Whether to use a residual shortcut connection. The connection is only added if c1 == c2. Defaults to True.
+        e (float, optional): Expansion ratio for the intermediate channels. Defaults to 0.5.
+        k1 (int, optional): Kernel size for the first DSConv layer. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv layer. Defaults to 5.
+        d2 (int, optional): Dilation for the second DSConv layer. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSBottleneck module.
+
+    Examples:
+        >>> import torch
+        >>> model = DSBottleneck(c1=64, c2=64, shortcut=True)
+        >>> x = torch.randn(2, 64, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+        t
+ */
+class DSBottleneckImpl : public torch::nn::Module
+{
+public:
+    // def __init__(self, c1, c2, shortcut=True, e=0.5, k1=3, k2=5, d2=1):
+    DSBottleneckImpl(int c1, int c2, bool shortcut = true,
+        float e = 0.5f, int k1 = 3, int k2 = 5, int d2 = 1)
+    {
+        int c_ = int(float(c2) * e);
+        cv1 = DSConv(c1, c_, k1, 1, std::nullopt, 1);
+        cv2 = DSConv(c_, c2, k2, 1, std::nullopt, d2);
+        register_module("cv1", cv1);
+        register_module("cv2", cv2);
+        this->add = shortcut && c1 == c2;
+    }
+
+    torch::Tensor forward(torch::Tensor x) {
+        auto y = cv2->forward(cv1->forward(x));
+        if (add)
+            return x + y;
+        return y;
+    }
+public:
+    DSConv cv1{ nullptr };
+    DSConv cv2{ nullptr };
+    bool add;
+};
+TORCH_MODULE(DSBottleneck);
+
+/*
+    """
+    An improved C3k module using DSBottleneck blocks for lightweight feature extraction.
+
+    This class extends the C3 module by replacing its standard bottleneck blocks with DSBottleneck blocks,
+    which use depthwise separable convolutions.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        n (int, optional): Number of DSBottleneck blocks to stack. Defaults to 1.
+        shortcut (bool, optional): Whether to use shortcut connections within the DSBottlenecks. Defaults to True.
+        g (int, optional): Number of groups for grouped convolution (passed to parent C3). Defaults to 1.
+        e (float, optional): Expansion ratio for the C3 module's hidden channels. Defaults to 0.5.
+        k1 (int, optional): Kernel size for the first DSConv in each DSBottleneck. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv in each DSBottleneck. Defaults to 5.
+        d2 (int, optional): Dilation for the second DSConv in each DSBottleneck. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSC3k module (inherited from C3).
+
+    Examples:
+        >>> import torch
+        >>> model = DSC3k(c1=128, c2=128, n=2, k1=3, k2=7)
+        >>> x = torch.randn(2, 128, 64, 64)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 128, 64, 64])
+    """
+*/
+class DSC3kImpl : public torch::nn::Module 
+{
+public:
+    /*
+        def __init__(
+        self,
+        c1,                
+        c2,                 
+        n=1,                
+        shortcut=True,      
+        g=1,                 
+        e=0.5,              
+        k1=3,               
+        k2=5,               
+        d2=1                 
+    ):*/
+    DSC3kImpl(int c1, int c2, int n = 1, bool shortcut = true, int g = 1,
+        float e = 0.5, int k1 = 3, int k2 = 5, int d2 = 1) {
+
+        int c_ = int(float(c2) * e);
+        cv1 = Conv(c1, c_, 1, 1);
+        cv2 = Conv(c1, c_, 1, 1);
+        cv3 = Conv(2 * c_, c2, 1);
+
+        for (int i = 0; i < n; i++)
+        {
+        /*
+        DSBottleneckImpl(int c1, int c2, bool shortcut = true,
+            float e = 0.5f, int k1 = 3, int k2 = 5, int d2 = 1)
+        */
+
+            m->push_back(*(DSBottleneck(
+                c_, c_, shortcut, 1.0, k1, k2, d2
+            )));
+        }
+
+        register_module("cv1", cv1);
+        register_module("cv2", cv2);
+        register_module("cv3", cv3);
+        register_module("m", m);
+    }
+
+    torch::Tensor forward(torch::Tensor x) {
+        return cv3->forward(torch::cat({
+            m->forward(cv1->forward(x)),
+            cv2->forward(x)
+            }, 1));
+    }
+
+public:
+    Conv cv1;
+    Conv cv2;
+    Conv cv3;
+    torch::nn::Sequential m;
+
+};
+TORCH_MODULE(DSC3k);
+
+/*
+    """
+    A module to fuse multi-scale features for the HyperACE block.
+
+    This module takes a list of three feature maps from different scales, aligns them to a common
+    spatial resolution by downsampling the first and upsampling the third, and then concatenates
+    and fuses them with a convolution layer.
+
+    Attributes:
+        c_in (int): The number of channels of the input feature maps.
+        channel_adjust (bool): Whether to adjust the channel count of the concatenated features.
+
+    Methods:
+        forward: Fuses a list of three multi-scale feature maps.
+
+    Examples:
+        >>> import torch
+        >>> model = FuseModule(c_in=64, channel_adjust=False)
+        >>> # Input is a list of features from different backbone stages
+        >>> x_list = [torch.randn(2, 64, 64, 64), torch.randn(2, 64, 32, 32), torch.randn(2, 64, 16, 16)]
+        >>> output = model(x_list)
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+*/
+class FuseModuleImpl : public torch::nn::Module
+{
+public:
+    FuseModuleImpl(int c_in, bool channel_adjust)
+    {
+        this->downsample = torch::nn::AvgPool2d(torch::nn::AvgPool2dOptions(2));
+        this->upsample = torch::nn::Upsample(
+            torch::nn::UpsampleOptions().scale_factor(std::vector<double>{2.0, 2.0})
+                                        .mode(torch::kNearest));
+        if (channel_adjust)
+            conv_out = Conv(4 * c_in, c_in, 1);
+        else
+            conv_out = Conv(3 * c_in, c_in, 1);
+
+        register_module("downsample", downsample);
+        register_module("upsample", upsample);
+        register_module("conv_out", conv_out);
+    }
+
+    torch::Tensor forward(std::vector<torch::Tensor> x)
+    {
+        auto x1_ds = downsample->forward(x[0]);
+        auto x3_up = upsample->forward(x[2]);
+        auto x_cat = torch::cat({x1_ds, x[1], x3_up}, 1);
+        auto out =  conv_out->forward(x_cat);
+        return out;
+    }
+
+public:
+    torch::nn::AvgPool2d downsample {nullptr};
+    torch::nn::Upsample upsample {nullptr};    
+    Conv conv_out;
+};
+TORCH_MODULE(FuseModule);
+
+class AdaHyperedgeGenImpl : public torch::nn::Module
+{
+public:
+    AdaHyperedgeGenImpl(int node_dim, int _num_hyperedges,
+        int _num_heads = 4, float _dropout = 0.1,
+        std::string _context = "both")
+    {
+        num_heads = _num_heads;
+        num_hyperedges = _num_hyperedges;
+        context = _context;
+        head_dim = static_cast<int>(std::trunc(float(node_dim) / float(num_heads)));
+        
+        prototype_base = register_parameter("prototype_base",
+            torch::empty({ num_hyperedges, node_dim }));
+        torch::nn::init::xavier_uniform_(prototype_base);
+
+        if (context == "mean" || context == "max")
+            context_net = torch::nn::Linear(torch::nn::LinearOptions(
+                node_dim, num_hyperedges * node_dim));
+        else if (context == "both")
+            context_net = torch::nn::Linear(torch::nn::LinearOptions(
+                2 * node_dim, num_hyperedges * node_dim));
+        else
+            LOG(ERROR) << "context wrong： " << context;
+
+        pre_head_proj = torch::nn::Linear(torch::nn::LinearOptions(
+                node_dim, node_dim));
+
+        // python __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+        dropout_net = torch::nn::Dropout(torch::nn::DropoutOptions().p(_dropout));
+
+        scaling = std::sqrt(this->head_dim);
+
+        register_module("context_net", context_net);
+        register_module("pre_head_proj", pre_head_proj);
+        register_module("dropout", dropout_net);
+    }
+
+    torch::Tensor forward(torch::Tensor x)
+    {
+        int B = x.size(0);
+        int N = x.size(1);
+        int D = x.size(2);
+        torch::Tensor context_cat;
+
+        if (context == "mean")
+        {
+            context_cat = x.mean(1);
+        }    
+        else if (context == "max")
+        {
+            torch::Tensor m_idx;
+            std::tie(context_cat, m_idx) = x.max(1);
+        }
+        else
+        {
+            auto avg_context = x.mean(1);
+            auto [max_context, max_idx] = x.max(1);
+            context_cat = torch::cat({ avg_context, max_context }, -1);
+        }
+
+        auto prototype_offset = context_net->forward(context_cat)
+            .view({ B, num_hyperedges, D });
+        auto prototypes = prototype_base.unsqueeze(0) + prototype_offset;
+
+        auto x_proj = pre_head_proj->forward(x);
+
+        auto x_heads = x_proj.view({ B, N, num_heads, head_dim }).transpose(1, 2);
+
+        auto proto_heads = prototypes.view({ B, num_hyperedges, num_heads,
+                head_dim }).permute({0, 2, 1, 3});
+
+        auto x_heads_flat = x_heads.reshape({ B * num_heads, N, head_dim });
+        
+        auto proto_heads_flat = proto_heads.reshape({ B * num_heads, num_hyperedges,
+            head_dim }).transpose(1, 2);
+
+        torch::Tensor logits = torch::bmm(x_heads_flat, proto_heads_flat) / this->scaling;
+        logits = logits.view({ B, num_heads, N, num_hyperedges }).mean(1);
+
+        logits = dropout_net->forward(logits);
+
+        return torch::nn::functional::softmax(logits, torch::nn::functional::SoftmaxFuncOptions(1));
+    }
+
+public:
+    int num_hyperedges;
+    int num_heads;
+    float dropout;
+    std::string context;
+
+    int head_dim;
+
+    torch::Tensor prototype_base;
+    torch::nn::Linear context_net{ nullptr };
+    torch::nn::Linear pre_head_proj{ nullptr };
+    torch::nn::Dropout dropout_net{ nullptr };
+
+    double scaling;
+};
+TORCH_MODULE(AdaHyperedgeGen);
+/*
+*  libtorch中没有GELU，可以直接计算，为保持代码与python的一致，写成类
+*/
+class GELUImpl : public torch::nn::Module
+{
+public:
+    GELUImpl() {};
+/*
+* pytorch 原函数下注释为
+   r"""Applies the Gaussian Error Linear Units function.
+
+    .. math:: \text{GELU}(x) = x * \Phi(x)
+
+    where :math:`\Phi(x)` is the Cumulative Distribution Function for Gaussian Distribution.
+
+    When the approximate argument is 'tanh', Gelu is estimated with:
+
+    .. math:: \textx * ({GELU}(x) = 0.5 * 1 + \text{Tanh}(\sqrt{2 / \pi} * (x + 0.044715 * x^3)))
+
+    Args:
+        approximate (str, optional): the gelu approximation algorithm to use:
+            ``'none'`` | ``'tanh'``. Default: ``'none'``
+
+    Shape:
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(*)`, same shape as the input.
+
+    .. image:: ../scripts/activation_images/GELU.png
+
+    Examples::
+
+        >>> m = nn.GELU()
+        >>> input = torch.randn(2)
+        >>> output = m(input)
+    """
+   网上查资料
+*/
+
+    torch::Tensor forward(torch::Tensor x)
+    {
+        //精度要求不高的近似解如下：
+        //return 0.5 * x * (1 + torch::tanh(std::sqrt(2 / M_PI) * (x + 0.044715 * torch::pow(x, 3)));
+        // 标准公式代码如下：
+        return x * 0.5 * (1 + torch::erf(x * std::sqrt(2)));
+        
+    }
+};
+TORCH_MODULE(GELU);
+
+class AdaHGConvImpl : public torch::nn::Module 
+{
+public:
+    // def __init__(self, embed_dim, num_hyperedges=16, num_heads=4, 
+    // dropout=0.1, context="both"):
+    AdaHGConvImpl(int embed_dim, int num_hyperedge = 16, int num_heads = 4,
+        float dropout = 0.1, std::string context = "both")
+    {
+        edge_generator = AdaHyperedgeGen(embed_dim, num_hyperedge, num_heads,
+            dropout, context);
+        edge_proj = torch::nn::Sequential(
+            torch::nn::Linear(embed_dim, embed_dim),
+            GELU()
+        );
+
+        node_proj = torch::nn::Sequential(
+            torch::nn::Linear(embed_dim, embed_dim),
+            GELU()
+        );
+
+        register_module("edge_generator", edge_generator);
+        register_module("edge_proj", edge_proj);
+        register_module("note_proj", node_proj);
+    }
+
+    torch::Tensor forward(torch::Tensor x)
+    {
+        auto A = edge_generator->forward(x);
+        
+        auto He = torch::bmm(A.transpose(1, 2), x);
+        
+        He = edge_proj->forward(He);
+        auto X_new = torch::bmm(A, He);
+
+        X_new = node_proj->forward(X_new);
+        return X_new + x;
+    }
+
+public:
+    AdaHyperedgeGen edge_generator{ nullptr };
+    torch::nn::Sequential node_proj;
+    torch::nn::Sequential edge_proj;
+};
+TORCH_MODULE(AdaHGConv);
+
+/*
+    """
+    A wrapper module for applying adaptive hypergraph convolution to 4D feature maps.
+
+    This class makes the hypergraph convolution compatible with standard CNN architectures. It flattens a
+    4D input tensor (B, C, H, W) into a sequence of vertices (tokens), applies the AdaHGConv layer to
+    model high-order correlations, and then reshapes the output back into a 4D tensor.
+
+    Attributes:
+        embed_dim (int): The feature dimension of the vertices (equivalent to input channels C).
+        num_hyperedges (int, optional): The number of hyperedges for the underlying AdaHGConv. Defaults to 16.
+        num_heads (int, optional): The number of attention heads for the underlying AdaHGConv. Defaults to 8.
+        dropout (float, optional): The dropout rate for the underlying AdaHGConv. Defaults to 0.1.
+        context (str, optional): The context type for the underlying AdaHGConv. Defaults to "both".
+
+    Methods:
+        forward: Processes a 4D feature map through the adaptive hypergraph computation layer.
+
+    Examples:
+        >>> import torch
+        >>> model = AdaHGComputation(embed_dim=64, num_hyperedges=8, num_heads=4)
+        >>> x = torch.randn(2, 64, 32, 32) # (B, C, H, W)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+*/
+class AdaHGComputationImpl : public torch::nn::Module
+{
+public:
+ //  def __init__(self, embed_dim, num_hyperedges=16, num_heads=8, dropout=0.1, context="both"):
+    AdaHGComputationImpl(int embed_dim, int num_hyperedges = 16, int num_heads = 8,
+        float dropout = 0.1, std::string context = "both") 
+    {
+        hgnn = AdaHGConv(embed_dim, num_hyperedges, num_heads,
+            dropout, context);
+        register_module("hgnn", hgnn);
+    }
+
+    torch::Tensor forward(torch::Tensor x) {
+        int B = x.size(0);
+        int C = x.size(1);
+        int H = x.size(2);
+        int W = x.size(3);
+        auto tokens = x.flatten(2).transpose(1, 2);
+        tokens = hgnn->forward(tokens);
+
+        auto x_out = tokens.transpose(1, 2).view({B, C, H, W});
+        return x_out;
+    }
+public:
+    AdaHGConv hgnn{ nullptr };
+};
+TORCH_MODULE(AdaHGComputation);
+/*
+"""
+A CSP - style block integrating Adaptive Hypergraph Computation(C3AH).
+
+The input feature map is split into two paths.
+One path is processed by the AdaHGComputation module to model high - order correlations, while the other
+serves as a shortcut.The outputs are then concatenated to fuse features.
+
+Attributes:
+c1(int) : Number of input channels.
+c2(int) : Number of output channels.
+e(float, optional) : Expansion ratio for the hidden channels.Defaults to 1.0.
+num_hyperedges(int, optional) : The number of hyperedges for the internal AdaHGComputation.Defaults to 8.
+context(str, optional) : The context type for the internal AdaHGComputation.Defaults to "both".
+
+Methods :
+    forward : Performs a forward pass through the C3AH module.
+
+    Examples :
+    >> > import torch
+    >> > model = C3AH(c1 = 64, c2 = 128, num_hyperedges = 8)
+    >> > x = torch.randn(2, 64, 32, 32)
+    >> > output = model(x)
+    >> > print(output.shape)
+    torch.Size([2, 128, 32, 32])
+    """
+*/
+class C3AHImpl : public torch::nn::Module {
+public:
+    C3AHImpl(int c1, int c2, float e = 1.0, int num_hyperedges = 8, std::string context = "bost")
+    {
+        int c_ = int(float(c2) * e);
+        if ((c_ % 16) != 0)
+            LOG(ERROR) << "C3AH c_ not multiple 16";
+
+        int num_heads = c_ / 16;
+        cv1 = Conv(c1, c_, 1, 1);
+        cv2 = Conv(c1, c_, 1, 1);
+           
+        m_adahg = AdaHGComputation(c_, num_hyperedges,
+            num_heads, 0.1, context);
+
+        cv3 = Conv(2 * c_, c2, 1);
+
+        register_module("cv1", cv1);
+        register_module("cv2", cv2);
+        register_module("m", m_adahg);
+        register_module("cv3", cv3);
+    }
+
+    torch::Tensor forward(torch::Tensor x)
+    {
+        return cv3->forward(torch::cat({
+            m_adahg->forward(cv1->forward(x)),
+                cv2->forward(x)}, 1));
+    }
+
+public:
+    Conv cv1;
+    Conv cv2;
+    Conv cv3;
+    AdaHGComputation m_adahg{nullptr};
+};
+TORCH_MODULE(C3AH);
+/*
+    """
+    Hypergraph-based Adaptive Correlation Enhancement (HyperACE).
+
+    This is the core module of YOLOv13, designed to model both global high-order correlations and
+    local low-order correlations. It first fuses multi-scale features, then processes them through parallel
+    branches: two C3AH branches for high-order modeling and a lightweight DSConv-based branch for
+    low-order feature extraction.
+
+    Attributes:
+        c1 (int): Number of input channels for the fuse module.
+        c2 (int): Number of output channels for the entire block.
+        n (int, optional): Number of blocks in the low-order branch. Defaults to 1.
+        num_hyperedges (int, optional): Number of hyperedges for the C3AH branches. Defaults to 8.
+        dsc3k (bool, optional): If True, use DSC3k in the low-order branch; otherwise, use DSBottleneck. Defaults to True.
+        shortcut (bool, optional): Whether to use shortcuts in the low-order branch. Defaults to False.
+        e1 (float, optional): Expansion ratio for the main hidden channels. Defaults to 0.5.
+        e2 (float, optional): Expansion ratio within the C3AH branches. Defaults to 1.
+        context (str, optional): Context type for C3AH branches. Defaults to "both".
+        channel_adjust (bool, optional): Passed to FuseModule for channel configuration. Defaults to True.
+
+    Methods:
+        forward: Performs a forward pass through the HyperACE module.
+
+    Examples:
+        >>> import torch
+        >>> model = HyperACE(c1=64, c2=256, n=1, num_hyperedges=8)
+        >>> x_list = [torch.randn(2, 64, 64, 64), torch.randn(2, 64, 32, 32), torch.randn(2, 64, 16, 16)]
+        >>> output = model(x_list)
+        >>> print(output.shape)
+        torch.Size([2, 256, 32, 32])
+    """
+    */
+class HyperACEImpl : public BaseModule
+{
+public:
+    //def __init__(self, c1, c2, n=1, num_hyperedges=8, dsc3k=True, shortcut=False, e1=0.5, e2=1, context="both", channel_adjust=True):
+    explicit HyperACEImpl(int c1, int c2, int n = 1, int num_hyperedges = 8, 
+        bool dsc3k = true,
+        bool shortcut = false,
+        float e1 = 0.5f, float e2 = 1.0f, std::string context = "both", bool channel_adjust = true)
+        {
+            Init_Modules(c1, c2, n, num_hyperedges, dsc3k, shortcut, e1, e2, context, channel_adjust);
+        };
+    HyperACEImpl() {};
+    ~HyperACEImpl() {};
+
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
+    torch::Tensor forward(std::vector<torch::Tensor> x) override;
+    torch::Tensor forward(torch::Tensor x) override;
+    int get_outchannels() override { return out_ch; };
+private:
+    int in_ch;
+    int out_ch;
+    int number;
+    int c;
+    bool b_use_dsc3k;
+
+    void Init_Modules(int c1, int c2, int n = 1, int num_hyperedges = 8, 
+        bool dsc3k = true,
+        bool shortcut = false,
+        float e1 = 0.5f, float e2 = 1.0f, std::string context = "both", bool channel_adjust = true);
+
+    Conv cv1{ nullptr };
+    Conv cv2{ nullptr };
+    torch::nn::ModuleList m;
+
+    FuseModule fuse{ nullptr };
+    C3AH branch1{ nullptr };
+    C3AH branch2{ nullptr };
+    
+};
+TORCH_MODULE(HyperACE);
+
+class DownsampleConvImpl : public BaseModule
+{
+public:
+    // def __init__(self, in_channels, channel_adjust=True):
+    explicit DownsampleConvImpl(int in_channels, bool _channel_adjust = true)
+    {
+        Init_Modules(in_channels, _channel_adjust);
+    }
+    DownsampleConvImpl() {};
+    ~DownsampleConvImpl() {};
+
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args)
+    {
+        int args_size = args.size();
+        if (args_size == 1)
+            Init_Modules(in_channels, std::get<bool>(args[0]));
+        else
+            LOG(WARNING) << "default args is empty() == true";
+    }
+    torch::Tensor forward(std::vector<torch::Tensor> x) override;
+    torch::Tensor forward(torch::Tensor x) override;
+    int get_outchannels() override { return out_ch; };
+private:
+    int in_ch;
+    int out_ch;
+    int number;
+
+    bool b_channel_adjust;
+    torch::nn::AvgPool2d downsample{ nullptr };
+    Conv channel_adjust;
+
+    void Init_Modules(int in_channels, bool _channel_adjust = true); 
+
+};
+TORCH_MODULE(DownsampleConv);
+
+class FullPAD_TunnelImpl : public BaseModule
+{
+public:
+    // def __init__(self, in_channels):
+    explicit FullPAD_TunnelImpl(int in_channels)
+    {
+        Init_Modules(in_channels);
+    }
+    FullPAD_TunnelImpl() {};
+    ~FullPAD_TunnelImpl() {};
+
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args)
+    {
+        int args_size = args.size();
+        if (args_size == 1)
+            Init_Modules(in_channels);
+        else
+            LOG(WARNING) << "default args is empty() == true";
+    }
+    torch::Tensor forward(std::vector<torch::Tensor> x) {
+        return x[0] + gate * x[1];
+    }
+    torch::Tensor forward(torch::Tensor x) {
+        LOG(ERROR) << "need input vecotr.";
+        return x;
+    }
+    int get_outchannels() override { return out_ch; };
+private:
+    int in_ch;
+    int out_ch;
+    int number;
+
+    torch::Tensor gate;
+
+    void Init_Modules(int in_channels) {
+        in_ch = in_channels;
+        out_ch = in_channels;
+
+        this->gate = register_parameter("gate", torch::tensor(0.0));
+    }
+
+};
+TORCH_MODULE(FullPAD_Tunnel);
+
+/*
+    """
+    An improved C3k2 module that uses lightweight depthwise separable convolution blocks.
+
+    This class redesigns C3k2 module, replacing its internal processing blocks with either DSBottleneck
+    or DSC3k modules.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        n (int, optional): Number of internal processing blocks to stack. Defaults to 1.
+        dsc3k (bool, optional): If True, use DSC3k as the internal block. If False, use DSBottleneck. Defaults to False.
+        e (float, optional): Expansion ratio for the C2f module's hidden channels. Defaults to 0.5.
+        g (int, optional): Number of groups for grouped convolution (passed to parent C2f). Defaults to 1.
+        shortcut (bool, optional): Whether to use shortcut connections in the internal blocks. Defaults to True.
+        k1 (int, optional): Kernel size for the first DSConv in internal blocks. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv in internal blocks. Defaults to 7.
+        d2 (int, optional): Dilation for the second DSConv in internal blocks. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSC3k2 module (inherited from C2f).
+
+    Examples:
+        >>> import torch
+        >>> # Using DSBottleneck as internal block
+        >>> model1 = DSC3k2(c1=64, c2=64, n=2, dsc3k=False)
+        >>> x = torch.randn(2, 64, 128, 128)
+        >>> output1 = model1(x)
+        >>> print(f"With DSBottleneck: {output1.shape}")
+        With DSBottleneck: torch.Size([2, 64, 128, 128])
+        >>> # Using DSC3k as internal block
+        >>> model2 = DSC3k2(c1=64, c2=64, n=1, dsc3k=True)
+        >>> output2 = model2(x)
+        >>> print(f"With DSC3k: {output2.shape}")
+        With DSC3k: torch.Size([2, 64, 128, 128])
+    """
+*/
+class DSC3k2Impl : public BaseModule
+{
+public:
+//      def __init__(self, c1, c2, n = 1, dsc3k = False, 
+//          e = 0.5, g = 1, shortcut = True, k1 = 3, k2 = 7,  d2 = 1 ):
+    explicit DSC3k2Impl(int c1, int c2, int n = 1, bool _dsc3k = false, float e = 0.5,
+        int g = 1, bool shortcut = true, int k1 = 3, int k2 = 7, int d2 = 1)
+    {
+        Init_Modules(c1, c2, n, _dsc3k, e, g, shortcut, k1, k2, d2);
+    }
+    DSC3k2Impl() {};
+    ~DSC3k2Impl() {};
+
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args)
+    {
+        int args_size = args.size();
+        if (args_size == 3)
+            Init_Modules(in_channels, std::get<int>(args[0]),
+                number, 
+                std::get<bool>(args[1]),
+                std::get<float>(args[2])
+            );
+        else if(args_size == 2)
+            Init_Modules(in_channels, std::get<int>(args[0]),
+                number, 
+                std::get<bool>(args[1]));
+        else
+            LOG(WARNING) << "default args support 3";
+    }
+    torch::Tensor forward(std::vector<torch::Tensor> x) {
+        LOG(ERROR) << "DSC3k2Impl forward not support vector input";
+        return x[0];
+    }
+    torch::Tensor forward(torch::Tensor x);
+    int get_outchannels() override { return out_ch; };
+private:
+    int in_ch;
+    int out_ch;
+    int number;
+
+    bool b_dsc3k;
+
+    Conv cv1;
+    Conv cv2;
+    torch::nn::ModuleList m;
+
+    void Init_Modules(int c1, int c2, int n = 1, bool _dsc3k = false, float e = 0.5,
+        int g = 1, bool shortcut = true, int k1 = 3, int k2 = 7, int d2 = 1);
+
+};
+TORCH_MODULE(DSC3k2);

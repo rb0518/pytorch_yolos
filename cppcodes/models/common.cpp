@@ -11,6 +11,7 @@ void nnUpsampleImpl::set_params(int in_channels, int number, std::vector<arg_com
     // args[0] None未用
     scale_size = static_cast<int64_t>(std::get<int>(args[1]));
     str_modetype = std::get<std::string>(args[2]);
+    std::cout << scale_size << " " << str_modetype << std::endl;
 #if 0
     // 该代码在Linux下无错，但windows下报错
     auto str_size = std::get<std::string>(args[0]);
