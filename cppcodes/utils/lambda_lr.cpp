@@ -36,8 +36,8 @@ std::vector<double> LambdaLR::get_lrs()
 
 double LambdaLR::fn_linear_lr(int x)
 {
-    auto ret = (1.0 - double(x) / double(step_size_ - 1)) * (1.0 - double(y2)) + double(y2);
-    return ret;
+    auto ret = std::max(1.0f - float(x) / float(step_size_),0.f) * (1.0f - float(y2)) + float(y2);
+    return double(ret);
 }
 double LambdaLR::fn_one_cycle(int x)
 {

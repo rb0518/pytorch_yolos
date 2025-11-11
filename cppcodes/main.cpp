@@ -203,7 +203,7 @@ int main(int argc, char* argv[])
         }
         jit_model.eval();
 
-        auto model = Model(model_filename, 80, FLAGS_img_size, FLAGS_img_size, 3, false);
+        auto model = Model(model_filename, 80, FLAGS_img_size, FLAGS_img_size, 3, nullptr);
         model->eval(); 
         if(FLAGS_runtype == "predict")
         {
@@ -254,7 +254,6 @@ int main(int argc, char* argv[])
 
             for (auto& param : model->named_parameters())
             {
-                torch::AutoGradMode enable_grad(false);
                 //torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
                 std::string str_name = param.key();
                 //std::cout << "model named_parameters: " << str_name << std::endl;

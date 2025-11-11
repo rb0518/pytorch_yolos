@@ -299,11 +299,28 @@ std::vector<torch::Tensor> non_max_suppression(
     return output;
 }
 
+void view_jitmodel_info(torch::jit::Module module, int layer_id)
+{
+    std::stringstream ss;
+    for (int i = 0; i <= layer_id; i++)
+        ss << "  ";
+
+    int ch_count = 0;
+    for (const auto& submodule : module.named_modules())
+    {
+        if (ch_count != 0)
+            view_jitmodel_info(submodule.value, layer_id + 1);
+        else
+            std::cout << ss.str() << submodule.name << std::endl;
+    }
+}
+
+
 int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& model, bool b_showinfo)
 {
     bool load_is_ok = false;
     torch::Device device = model.parameters().begin()->device();
-    torch::NoGradGuard nograd;
+
     torch::jit::script::Module jit_model;
     try {
         jit_model = torch::jit::load(strScriptfile);
@@ -335,7 +352,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     for (const auto& param : jit_model.named_parameters())
     {
         jit_params[param.name] = param.value;
-        //std::cout << "jit_model:  " << param.name << std::endl;
+//        std::cout << "jit_model:  " << param.name << std::endl;
     }
     auto jit_params_count = jit_params.size();
     int n_params = 0;
@@ -345,12 +362,21 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
     match_layers.push_back("model.23.");
 #endif
 
+#if 0
+    int jit_model_count = 0;
+    for (const auto& submodule : jit_model.named_modules())
+    {
+        std::cout << "Jit module: " << jit_model_count << std::endl;
+        view_jitmodel_info(submodule.value, 0);
+        jit_model_count++;
+    }
+#endif
+
     for (auto& param : model.named_parameters())
     {
-        torch::AutoGradMode enable_grad(false);
-        //torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
+        torch::NoGradGuard no_grad;   // 对模板进行操作时，不能是目标与源tensor一个有grad,一个无grad      
         std::string str_name = param.key();
-        //std::cout << "model named_parameters: " << str_name << std::endl;
+//        std::cout << "model named_parameters: " << str_name << std::endl;
         //  "model-1.m-1.bn1.bias" ==> "model.1.m.1.bn1.bias
         str_name = std::regex_replace(str_name, std::regex("-"), ".");
 #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_        
@@ -362,7 +388,7 @@ int LoadWeightFromJitScript(const std::string strScriptfile, torch::nn::Module& 
         {
             if (jit_params[str_name].sizes() == param.value().sizes())
             {
-                std::cout << "trans ok : " << str_name << std::endl;
+                // std::cout << "trans ok : " << str_name << std::endl;
                 count_changes += 1;
                 param.value().data().copy_(jit_params[str_name].data());
             }
@@ -568,7 +594,7 @@ std::vector<torch::Tensor> non_max_suppression(
 
     for (size_t xi = 0; xi < prediction.size(0); ++xi)
     {
-        auto x = prediction[xi];
+        torch::Tensor x = prediction[xi];
         x = x.index({ xc[xi] });
         if (x.size(0) == 0)
         {
@@ -577,16 +603,16 @@ std::vector<torch::Tensor> non_max_suppression(
         }
 
         auto xyxy_cls_mask = x.split({ 4, nc, nm }, 1);
-        auto box = xyxy_cls_mask[0];
-        auto cls = xyxy_cls_mask[1];
-        auto mask = xyxy_cls_mask[2];
+        torch::Tensor box = xyxy_cls_mask[0];
+        torch::Tensor cls = xyxy_cls_mask[1];
+        torch::Tensor mask = xyxy_cls_mask[2];
         std::cout << "cls " << cls.sizes() << " box " << box.sizes()
             << " mask " << mask.sizes() << std::endl;
         if (multi_label)
         {
             auto cls_where = torch::where(cls > conf_thres);
-            auto i = cls_where[0];
-            auto j = cls_where[1];
+            torch::Tensor i = cls_where[0];
+            torch::Tensor j = cls_where[1];
             std::cout << "i " << i.sizes() << " j " << j.sizes() << std::endl;
             auto box_i = box.index({ i });
             auto x_ij = x.index({ i, 4 + j, torch::indexing::None });
@@ -598,7 +624,8 @@ std::vector<torch::Tensor> non_max_suppression(
         }
         else
         {
-            auto [conf, j] = cls.max(1, true);
+            torch::Tensor conf, j;
+            std::tie(conf, j) = at::_ops::max_dim::call(cls, 1, true);
             x = torch::cat({ box, conf, j.to(torch::kFloat), mask }, 1).index(
                 {conf.view(-1)> conf_thres});
         }

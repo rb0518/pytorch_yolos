@@ -6,96 +6,19 @@
 
 #include "tal.h"
 
-class Detect_2Conv_Conv2d : public torch::nn::Module
-{
-public:
-    Detect_2Conv_Conv2d(int x, int c2, int reg_or_nc)
-    {
-        cv1 = Conv(x, c2, 3);
-        cv2 = Conv(c2, c2, 3);
-        c = torch::nn::Conv2d(torch::nn::Conv2dOptions(c2, reg_or_nc, 1));
-        register_module("0", cv1);
-        register_module("1", cv2);
-        register_module("2", c);
-    }
+/*
+    解决libtorch中Sequential里须明确forward方法的限制
+    注意：在此Sequential下所有子类的forward都与下现的forward定义要保持一致
+*/
+struct StackSequentailImpl : torch::nn::SequentialImpl {
+  using torch::nn::SequentialImpl::SequentialImpl;
 
-    torch::Tensor forward(torch::Tensor x)
-    {
-        return c->forward(cv2->forward(cv1->forward(x)));
-    }
-
-    void init_bias(bool b_cv2, int nc, double d_f)
-    {
-        std::cout << "Detect_2Conv_Conv2d::init_bias ";
-        if (this->c->bias.defined())
-        {
-            if(b_cv2)
-            {
-                std::cout << "cv2: fill with 1.0\n";
-                c->bias.data().fill_(1.0);
-            }
-            else{
-                std::cout << "cv3: fill with: " << nc << " " << d_f << std::endl;
-                c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, d_f);
-            }
-        }
-        else{
-            LOG(ERROR) << "Conv2d not define bias.";
-        }
-        std::cout << " over\n";
-    }
-
-public:
-    Conv cv1;
-    Conv cv2;
-    torch::nn::Conv2d c{nullptr};
+  torch::Tensor forward(torch::Tensor x) {
+    return SequentialImpl::forward(x);
+  }
 };
 
-class Detect_cv3_2DWConvConv_Conv2d : public torch::nn::Module
-{
-public:
-    Detect_cv3_2DWConvConv_Conv2d(int x, int c3, int nc)
-    {
-        dw1 = DWConv(x, x, 3);
-        cv1 = Conv(x, c3, 1);
-        dw2 = DWConv(c3, c3, 3);
-        cv2 = Conv(c3, c3, 1);
-        c = torch::nn::Conv2d(torch::nn::Conv2dOptions(c3, nc, 1));
-
-        register_module("0-0", dw1);
-        register_module("0-1", cv1);
-
-        register_module("1-0", dw2);
-        register_module("1-1", cv2);
-
-        register_module("2", c);
-    }
-    torch::Tensor forward(torch::Tensor x)
-    {
-        return c->forward(cv2->forward(dw2->forward(cv1->forward(dw1->forward(x)))));
-    }
-
-    void init_bias(bool b_cv2, int nc, double d_f)  // 保持与cv2函数一致，但不管b_cv2的值了
-    {
-        std::cout << "Detect_cv3_2DWConvConv_Conv2d::init_bias ";
-        if (this->c->bias.defined())
-        {
-            std::cout << "cv3: fill with: " << nc << " " << d_f << std::endl;            
-            c->bias.data().index_put_({ torch::indexing::Slice(0, nc) }, d_f);
-        }
-        else{
-            LOG(ERROR) << "Conv2d not define bias.";
-        }
-        std::cout << " over. \n";
-    }
-public:
-    DWConv  dw1;
-    Conv    cv1;
-    DWConv  dw2;
-    Conv    cv2;
-    torch::nn::Conv2d c{nullptr};
-};
-
+TORCH_MODULE(StackSequentail);
 
 DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
 {
@@ -105,24 +28,35 @@ DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
     no = nc + reg_max * 4;  // number of ouputs per anchors
     stride = torch::zeros({nl});
 
-    std::cout << "ch: [ " << _ch[0] <<" " << _ch[1] << " " << _ch[2] << " ]\n";
+    //std::cout << "ch: [ " << _ch[0] <<" " << _ch[1] << " " << _ch[2] << " ]\n";
     c2 = std::max(16, std::max(_ch[0] / 4, reg_max * 4));
     c3 = std::max(_ch[0], std::min(nc, 100));
 
-    std::cout << "c2: " << c2 << " c3: " << c3 << std::endl;
+    //std::cout << "c2: " << c2 << " c3: " << c3 << std::endl;
     for(int i = 0; i < _ch.size(); i++)
     {
         auto x = _ch[i];
-        std::cout << " x : _ch: " << x << " c2 " << c2 << " c3: " << c3 << std::endl;
-        cv2->push_back(Detect_2Conv_Conv2d(x, c2, 4* reg_max));
-
+        //std::cout << " x : _ch: " << x << " c2 " << c2 << " c3: " << c3 << std::endl;
+        //cv2->push_back(Detect_2Conv_Conv2d(x, c2, 4* reg_max));
+        cv2->push_back(torch::nn::Sequential(
+            Conv(x, c2, 3), Conv(c2, c2, 3), 
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(c2, 4 * reg_max, 1))
+            ));
+      
         if(legacy)
         {
-            cv3->push_back(Detect_2Conv_Conv2d(x, c3, nc));
+            cv3->push_back(torch::nn::Sequential(
+                Conv(x, c3, 3), Conv(c3, c3, 3), 
+                torch::nn::Conv2d(torch::nn::Conv2dOptions(c3, nc, 1))
+            ));
         }
         else{
-            cv3->push_back(Detect_cv3_2DWConvConv_Conv2d(x, c3, nc));
-        }
+            cv3->push_back(torch::nn::Sequential(
+                StackSequentail(DWConv(x, x, 3), Conv(x, c3, 1)),
+                StackSequentail(DWConv(c3, c3, 3), Conv(c3,c3, 1)),
+                torch::nn::Conv2d(torch::nn::Conv2dOptions(c3, nc, 1))
+            ));
+        }       
     }
 
     if(reg_max > 1)
@@ -139,13 +73,23 @@ DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
         // libtorch 没有copy.deepcopy 
         for(auto x : _ch)
         {
-            one2one_cv2->push_back(Detect_2Conv_Conv2d(x, c2, 4*reg_max));
+            one2one_cv2->push_back(torch::nn::Sequential(
+                        Conv(x, c2, 3), Conv(c2, c2, 3), 
+                        torch::nn::Conv2d(torch::nn::Conv2dOptions(c2, 4 * reg_max, 1))
+                    ));
             if(legacy)
             {
-                one2one_cv3->push_back(Detect_2Conv_Conv2d(x, c3, nc));
+                one2one_cv3->push_back(torch::nn::Sequential(
+                        Conv(x, c3, 3), Conv(c3, c3, 3), 
+                        torch::nn::Conv2d(torch::nn::Conv2dOptions(c3, nc, 1))
+                    ));
             }
             else{
-                one2one_cv3->push_back(Detect_cv3_2DWConvConv_Conv2d(x, c3, nc));
+                one2one_cv3->push_back(torch::nn::Sequential(
+                        DWConv(x, x, 3), Conv(x, c3, 1),
+                        DWConv(c3, c3, 3), Conv(c3,c3, 1),
+                        torch::nn::Conv2d(torch::nn::Conv2dOptions(c3, nc, 1))
+                    ));
             }
         }
         register_module("one2one_cv2", one2one_cv2);
@@ -158,36 +102,28 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>>
         DetectImpl::forward(std::vector<torch::Tensor> x)
 {
     // C++函数不能简单各分支返回不一样的内容
+    std::vector<torch::Tensor> x_ret;
     if(end2end){
 
     }
     
     for(int i = 0; i < nl; i++)
     {
-        // std::cout << "Detect i: " << i << " input: " << x[i].sizes() << "\n";
-        auto cv2_any = cv2[i]->as<Detect_2Conv_Conv2d>();
-        if(legacy)
-        {
-            auto cv3_any = cv3[i]->as<Detect_2Conv_Conv2d>();
-            x[i] = torch::cat({ cv2_any->forward(x[i]), cv3_any->forward(x[i]) }, 1);
-        }
-        else{
-            auto cv3_any = cv3[i]->as<Detect_cv3_2DWConvConv_Conv2d>();
-            x[i] = torch::cat({ cv2_any->forward(x[i]), cv3_any->forward(x[i]) }, 1);
-        }
-        // std::cout << "output: " << x[i].sizes() <<"\n";
+        auto cv2_any = cv2[i]->as<torch::nn::Sequential>();
+        auto cv3_any = cv3[i]->as<torch::nn::Sequential>();
+        x_ret.emplace_back(torch::cat({cv2_any->forward(x[i]), cv3_any->forward(x[i])}, 1));
     }
 
     if (is_training())   // 如果是训练 
-        return std::make_tuple(torch::empty({ 1 }), x);
+        return std::make_tuple(torch::empty({ 1 }), x_ret);
 
-    auto y = _inference(x);
+    auto y = _inference(x_ret);
 
-    return { y, x };
+    return { y, x_ret };
 }
 
 std::tuple<torch::Tensor, std::unordered_map<std::string, std::vector<torch::Tensor>>>
-DetectImpl::forward_end2end(std::vector<torch::Tensor>& x) 
+DetectImpl::forward_end2end(std::vector<torch::Tensor> x) 
 {
     std::vector<torch::Tensor> x_detach;
     for (const auto& xi : x) {
@@ -311,24 +247,35 @@ at::Tensor DetectImpl::decode_bboxes(torch::Tensor bboxes, torch::Tensor anchors
 
 void DetectImpl::bias_init()
 {
+    torch::NoGradGuard nograd;
     std::cout << "bias_init: \n";
+
     for(int i = 0; i < nl; i++)
     {
-        auto cv2_any = cv2[i]->as<Detect_2Conv_Conv2d>();
-        cv2_any->init_bias(true, nc, 1.f);
-
         double s = this->stride[i].item().toDouble();
         double log_val = std::log(5.0 / nc / std::pow(640.0 / s, 2));
-        //std::cout << "s: " << s << " nc: " << nc << " fill_val: " << log_val << std::endl;
-        printf("s: %d nc: %d fill_val: %lf", int(s), int(nc), log_val);
-        if (legacy)
+
+        auto cv2_any = cv2[i]->as<torch::nn::Sequential>();
+        std::cout << i << " cv2 size: " << cv2_any->size() << " childrens: " << cv2_any->children().size() << std::endl;
+        auto cv2_module = cv2_any->children().back()->as<torch::nn::Conv2d>();
+        if (cv2_module != nullptr)
         {
-            auto cv3_any = cv3[i]->as<Detect_2Conv_Conv2d>();
-            cv3_any->init_bias(false, nc, log_val);
+            if (cv2_module->bias.defined())
+                cv2_module->bias.data().fill_(1.0);
+            else
+                std::cout << "cv2->bias not defined." << std::endl;
         }
-        else {
-            auto cv3_any = cv3[i]->as<Detect_cv3_2DWConvConv_Conv2d>();
-            cv3_any->init_bias(false, nc, log_val);
+
+        auto cv3_any = cv3[i]->as<torch::nn::Sequential>();
+        std::cout << i << " cv3 size: " << cv3_any->size() << " childrens: " << cv3_any->children().size() << std::endl;
+        auto cv3_module = cv3_any->children().back()->as<torch::nn::Conv2d>();
+        if (cv3_module != nullptr)
+        {
+            if (cv3_module->bias.defined())
+                cv3_module->bias.data().index_put_(
+                    { torch::indexing::Slice(0, nc) }, log_val);
+            else
+                std::cout << "cv2->bias not defined." << std::endl;
         }
     }
 }
@@ -352,7 +299,7 @@ torch::Tensor DetectImpl::postprocess(torch::Tensor preds, int max_det, int nc /
     scores = scores.gather(1, indices.repeat({ 1, 1, nc }));
     std::tie(scores, indices) = scores.flatten(1).topk(std::min(max_det, anchors));
 
-    auto final_indices = (indices.clone() % nc).unsqueeze(-1).to(torch::kFloat);
+    auto final_indices = torch::remainder(indices.clone(),nc).unsqueeze(-1).to(torch::kFloat);
     scores = scores.unsqueeze(-1);
 
     auto i = torch::arange(batch_size, torch::TensorOptions().dtype(dtype).device(device)).unsqueeze(-1);

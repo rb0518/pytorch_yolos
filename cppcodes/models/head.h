@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /*
     # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
@@ -62,7 +62,7 @@ public:
         forward(std::vector<torch::Tensor> x);
 
     std::tuple<torch::Tensor, std::unordered_map<std::string, std::vector<torch::Tensor>>>
-        forward_end2end(std::vector<torch::Tensor>& x);
+        forward_end2end(std::vector<torch::Tensor> x);
 
     at::Tensor _inference(std::vector<at::Tensor> x);
     at::Tensor decode_bboxes(torch::Tensor bboxes, torch::Tensor anchors, bool xywh = true);

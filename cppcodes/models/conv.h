@@ -23,6 +23,7 @@
 #include <BaseModel.h>
 #include <torch/torch.h>
 
+int autopad(int k, std::optional<int> p = std::nullopt, int d = 1);
 
 /*
     """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
@@ -32,32 +33,33 @@ class ConvImpl : public BaseModule
     // def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
 public:
     ConvImpl(){};
-    ~ConvImpl(){};
+    ConvImpl(int in_channels, int number, std::vector<arg_complex>& args) ;
+
     explicit ConvImpl(int c1, int c2, int k = 1, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True");
     
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;
-    void check_args(std::vector<arg_complex>& args);
+    virtual void set_params(int in_channels, int number, std::vector<arg_complex>& args) ;
+    virtual int get_outchannels() ;
+
+    torch::Tensor forward(torch::Tensor x) ;
 
     void fuse_conv_and_bn(bool fused_ = true);
-public:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
+protected:
+    int _in_channel;
+    int _out_channel;
+    int _kernel_size;
+    int _stride;
+    std::optional<int> _padding;
+    int _groups;
+    int _dilation;
+    std::string _act;
 
     bool fused = false;
-    bool bfirst = true;
-    
-    void Init_Modules(int c1, int c2, int k = 1, int s = 1, std::optional<int> p = std::nullopt , int g = 1, int d = 1, std::string act = "True" );
+
+    void Init_Modules(int c1, int c2, int k = 1, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True");
+public:    
     torch::nn::Conv2d conv{ nullptr };
     torch::nn::BatchNorm2d bn{ nullptr };
-
-    torch::nn::AnyModule _act;
+    torch::nn::AnyModule active_fn;
 
     torch::nn::Conv2d fusedconv{ nullptr };
 };
@@ -66,80 +68,45 @@ TORCH_MODULE(Conv);
 /*
     """Simplified RepConv module with Conv fusing."""
 */
-class Conv2Impl : public BaseModule
+class Conv2Impl : public ConvImpl
 {
-    //def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True):
 public:
     Conv2Impl(){};
-    ~Conv2Impl(){};
+
+    //def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True):
     explicit Conv2Impl(int c1, int c2, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True");
     
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;
-    void check_args(std::vector<arg_complex>& args);
+    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) ;
+    torch::Tensor forward(torch::Tensor x) ;
 
-    void fuse_conv_and_bn(bool fused_ = true);
-private:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
-
-    bool fused = false;
-    bool bfirst = true;
-    
+protected:
+   
     void Init_Modules(int c1, int c2, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True" );
-    torch::nn::Conv2d conv{ nullptr };
-    torch::nn::BatchNorm2d bn{ nullptr };
-
-    torch::nn::AnyModule _act;
+public:  
 
     torch::nn::Conv2d cv2 {nullptr};
-    torch::nn::Conv2d fusedconv{ nullptr };
 };
 TORCH_MODULE(Conv2);
 
 
 /*
     """Depth-wise convolution."""
+    在rtdetr-[lx].yaml中定义过，5个参数
 */
-class DWConvImpl : public BaseModule
+class DWConvImpl : public ConvImpl
 {
-    //c1, c2, k=1, s=1, p=None, g=1, act=True
 public:
     DWConvImpl() {};
-    ~DWConvImpl() {};
+    
+    //     def __init__(self, c1, c2, k=1, s=1, d=1, act=True):
     explicit DWConvImpl(int c1, int c2, int k = 1, int s = 1, int d = 1, std::string act = "True");
+   
+    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) ;
 
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override { return out_ch; };
-    void check_args(std::vector<arg_complex>& args);
-
-    void fuse_conv_and_bn(bool fused_ = true);
-public:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
-
-    bool fused = false;
-    bool bfirst = true;
-
+    torch::Tensor forward(torch::Tensor x) ;
+protected:
     void Init_Modules(int c1, int c2, int k = 1, int s = 1, int d = 1, std::string act = "True");
-    torch::nn::Conv2d conv{ nullptr };
-    torch::nn::BatchNorm2d bn{ nullptr };
-
-    torch::nn::AnyModule _act;
-
-    torch::nn::Conv2d fusedconv{ nullptr };
+public:
 };
 TORCH_MODULE(DWConv);
 
@@ -149,62 +116,44 @@ TORCH_MODULE(DWConv);
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
   
     """Initialize Conv layer with given arguments including activation."""
+    未在任何配置文件中出现，属直接调用
 */
-class LightConvImpl  : public BaseModule
+class LightConvImpl  : public torch::nn::Module
 {
 public:    
-    LightConvImpl() {};
-    ~LightConvImpl() {};
     // def __init__(self, c1, c2, k=1, act=nn.ReLU()):
     explicit LightConvImpl(int c1, int c2, int k = 1, std::string act = "ReLU");
+    torch::Tensor forward(torch::Tensor x) ;
 
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override { return out_ch; };
-    void check_args(std::vector<arg_complex>& args);  
 public:  
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
-
     Conv conv1;
     DWConv conv2;
-
-    void Init_Modules(int c1, int c2, int k = 1, std::string act = "ReLU");
 };
 TORCH_MODULE(LightConv);
 
 /*
     """Focus wh information into c-space."""
     """Initializes Focus object with user defined channel, convolution, padding, group and activation values."""
+    后续已经未在配置中出现，暂时保留
 */
 class FocusImpl : public BaseModule
 {
 public:
     FocusImpl(){};
-    ~FocusImpl(){};
+    FocusImpl(int in_channels, int number, std::vector<arg_complex>& args);
+
     // def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
     explicit FocusImpl(int c1, int c2, int k = 1, int s = 1, 
         std::optional<int> p = std::nullopt, int g = 1, std::string act = "True");
     
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;
-    void check_args(std::vector<arg_complex>& args);
-private:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
+    int get_outchannels();
 
-    Conv conv;
+    torch::Tensor forward(torch::Tensor x);
+private:
+    int _out_channel;
+
+    Conv conv{ nullptr };
 
     void Init_Modules(int c1, int c2, int k = 1, int s = 1,
         std::optional<int> p = std::nullopt, int g = 1, std::string act = "True");
@@ -218,44 +167,40 @@ class ConcatImpl : public BaseModule
 {
 public:
     ConcatImpl(){};
-    ~ConcatImpl(){}; 
+    ConcatImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;    
+    int get_outchannels() ;
+
+    torch::Tensor forward(std::vector<torch::Tensor> x) ;
 public:
-    int in_ch;
-    int out_ch;
-    int dimen;
+    int _dimen;
 };
 TORCH_MODULE(Concat);
 
 /*
     """Concatenate a list of tensors along dimension."""    """Initializes Focus object with user defined channel, convolution, padding, group and activation values."""
+    在v8中配置中实用，暂时未用到
 */
 class GhostConvImpl : public BaseModule
 {
 public:
     GhostConvImpl(){};
-    ~GhostConvImpl(){}; 
+    GhostConvImpl(int in_channels, int number, std::vector<arg_complex>& args);
+
     // def __init__(self, c1, c2, k=1, s=1, g=1, act=True):
     explicit GhostConvImpl(int c1, int c2, int k = 1, int s = 1, int g = 1, std::string act="True");
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;    
-public:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
+    int get_outchannels() ;    
 
+    torch::Tensor forward(torch::Tensor x) ;
+protected:
+    int _out_channel;
+
+    void Init_Modules(int c1, int c2, int k = 1, int s = 1, int g = 1, std::string act = "True");
+public:
     Conv cv1;
     Conv cv2;
-
-    void Init_Modules(int c1, int c2, int k = 1, int s = 1, int g = 1, std::string act="True");    
 };
 TORCH_MODULE(GhostConv);
 
@@ -273,38 +218,35 @@ class DWConvTranspose2d : public torch::nn::ConvTranspose2d
 };
 
 /*
+* """Convolution transpose 2d layer."""
+* 在v6版本中实用，暂时未实现，先保留， 4 个参数
 */
 class ConvTransposeImpl : public BaseModule
 {
 public:
     ConvTransposeImpl(){};
-    ~ConvTransposeImpl(){};
+    ConvTransposeImpl(int in_channels, int number, std::vector<arg_complex>& args);
+
     // def __init__(self, c1, c2, k=2, s=2, p=0, bn=True, act=True):
-    explicit ConvTransposeImpl(int c1, int c2, int k = 2, int s = 2, int p0 = 0, bool bn = true, std::string act = "True");
+    explicit ConvTransposeImpl(int c1, int c2, int k = 2, int s = 2, int p = 0, bool bn = true, std::string act = "True");
     
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args);
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) override;
-    torch::Tensor forward(torch::Tensor x) override;
-    int get_outchannels() override {return out_ch;} ;
-    void check_args(std::vector<arg_complex>& args);
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
+    int get_outchannels() ;
+
+    torch::Tensor forward(torch::Tensor x) ;
 
     void fuse_conv_and_bn(bool fused_ = true);
-public:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
 
-    bool fused = false;
-    bool bfirst = true;
-    
-    void Init_Modules(int c1, int c2, int k = 2, int s = 2, int p0 = 0, bool bn = true, std::string act = "True");
+protected:
+    int _out_channel;
+
+    void Init_Modules(int c1, int c2, int k = 2, int s = 2, int p = 0, bool bn = true, std::string act = "True");
+
+public:
     torch::nn::ConvTranspose2d conv_transpose{ nullptr };
 
-    torch::nn::AnyModule _bn;
-    torch::nn::AnyModule _act;
+    torch::nn::AnyModule anymodule_bn;   // 用AnyModule，不用forward和forward_fuse
+    torch::nn::AnyModule anymodule_act;
 };
 TORCH_MODULE(ConvTranspose);
 
@@ -326,20 +268,8 @@ TORCH_MODULE(ConvTranspose);
 class ChannelAttentionImpl : public torch::nn::Module 
 {
 public:
-    explicit ChannelAttentionImpl(int channels) {
-        _pool = torch::nn::AdaptiveAvgPool2d(torch::nn::AdaptiveAvgPool2dOptions(1));
-        _fc = torch::nn::Conv2d(torch::nn::Conv2dOptions(channels, channels, 1).stride(1).padding(0).bias(true));
-        _act = torch::nn::Sigmoid();
-
-        register_module("pool", _pool);
-        register_module("fc", _fc);
-        register_module("act", _act);
-    }
-
-    torch::Tensor forward(torch::Tensor x)
-    {
-        return x * _act->forward(_fc->forward(_pool->forward(x)));
-    }
+    explicit ChannelAttentionImpl(int channels);
+    torch::Tensor forward(torch::Tensor x);
 public:
     torch::nn::AdaptiveAvgPool2d _pool{ nullptr };
     torch::nn::Conv2d _fc{ nullptr };
@@ -361,27 +291,8 @@ TORCH_MODULE(ChannelAttention);
 class SpatialAttentionImpl : public torch::nn::Module
 {
 public:
-    explicit SpatialAttentionImpl(int kernel_size = 7)
-    {
-        if (kernel_size == 7 || kernel_size == 3)
-        {
-            int padding = kernel_size == 7 ? 3 : 1;
-            cv1 = torch::nn::Conv2d(torch::nn::Conv2dOptions(2, 1, kernel_size)
-                .padding(padding).bias(false));
-            act = torch::nn::Sigmoid();
-            register_module("cv1", cv1);
-            register_module("act", act);
-        }
-        else
-            LOG(ERROR) << "Kernel size muse be 7 or 7";
-    }
-
-    torch::Tensor forward(torch::Tensor x)
-    {
-        auto [x_max_v, x_max_i] = torch::max(x, 1, true);
-        auto x_mean = torch::mean(x, 1, true);
-        return x * act->forward(cv1->forward(torch::cat({ x_mean, x_max_v }, 1)));
-    }
+    explicit SpatialAttentionImpl(int kernel_size = 7);
+    torch::Tensor forward(torch::Tensor x);
 public:
     torch::nn::Conv2d cv1{ nullptr };
     torch::nn::Sigmoid act{ nullptr };
@@ -401,16 +312,8 @@ TORCH_MODULE(SpatialAttention);
 */
 class CBAMImpl : public torch::nn::Module {
 public:
-    CBAMImpl(int c1, int k = 7)
-    {
-        channel_attention = ChannelAttention(c1);
-        spatial_attention = SpatialAttention(k);
-    }
-
-    torch::Tensor forward(torch::Tensor x)
-    {
-        return spatial_attention->forward(channel_attention->forward(x));
-    }
+    CBAMImpl(int c1, int kernel_size = 7);
+    torch::Tensor forward(torch::Tensor x);
 
 public:
     ChannelAttention channel_attention{nullptr};
@@ -427,46 +330,22 @@ class DSConvImpl : public BaseModule
    // def __init__(self, c_in, c_out, k=3, s=1, p=None, d=1, bias=False):
 public:
     DSConvImpl(){};
-    ~DSConvImpl(){};
-    explicit DSConvImpl(int c_in, int c_out, int k = 3, int s = 1, 
-        std::optional<int> p = std::nullopt, int d = 1, bool bias = false)
-        {
-            Init_Modules(c_in, c_out, k, s, p, d, bias);
-        }
+    DSConvImpl(int in_channels, int number, std::vector<arg_complex>& args);
+
+    explicit DSConvImpl(int c_in, int c_out, int k = 3, int s = 1,
+        std::optional<int> p = std::nullopt, int d = 1, bool bias = false);
     
-    void set_params(int inchannels, int number, std::vector<arg_complex>& args)
-    {
-        int args_cout = args.size();
-        if(args_cout == 3)
-        {
-            Init_Modules(inchannels, std::get<int>(args[0]),
-                        std::get<int>(args[1]),
-                        std::get<int>(args[2]) );
-        }
-        else{
-            LOG(ERROR) << "number of DWConv args wrong: " << args_cout;
-            Init_Modules(inchannels, std::get<int>(args[0]));
-        }
-    }
-    // 简化下转参数的适应性，后续再修改
-    torch::Tensor forward(std::vector<torch::Tensor> x) 
-    {
-        LOG(ERROR) << "Not support.";
-        return x[0];
-    }
-    torch::Tensor forward(torch::Tensor x) 
-    {
-        return act->forward(bn->forward(pw->forward(dw->forward(x))));
-    };
-    int get_outchannels() override {return out_ch;} ;
-public:
-    int in_ch;
-    int out_ch;
-    int k_size;
-    int stride;
-    int padding;
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
+    int get_outchannels() ;   
     
+    torch::Tensor forward(torch::Tensor x);
+
+protected:
+    int _out_channel;
+
     void Init_Modules(int c_in, int c_out, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int d = 1, bool bias = false);
+
+public:
     torch::nn::Conv2d dw{ nullptr };
     torch::nn::Conv2d pw{ nullptr };
 

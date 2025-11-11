@@ -27,7 +27,6 @@ void load_default_environment(const std::string& root_path, VariantConfigs& opts
 }
 
 #include "utils.h"
-
 std::tuple<std::string, std::filesystem::file_time_type> found_newest_ptfile(const std::filesystem::path& path)
 {
     int found = 0;

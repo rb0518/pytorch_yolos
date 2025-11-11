@@ -15,7 +15,7 @@ v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int t
 
     bce = torch::nn::BCEWithLogitsLoss(
         torch::nn::BCEWithLogitsLossOptions().reduction(torch::kNone));
-    std::shared_ptr<DetectImpl> m = model->last_module;
+    std::shared_ptr<DetectImpl> m = model->getLastModulePtr();
 
     hyp = model->p_args;
     // check
@@ -55,7 +55,8 @@ torch::Tensor v8DetectionLossImpl::preprocess(torch::Tensor targets,
     counts = counts.to(torch::kInt32);
     auto out = torch::zeros({ batch_size, counts.max().item().toInt(), ne - 1 },
         torch::TensorOptions().device(device));
-
+    // std::cout << "preprocess out " << out.sizes() << " counts: " << counts.sizes() <<
+    //     " c_max: " << counts.max() << std::endl;
     for (int j = 0; j < batch_size; j++) {
         torch::Tensor matches = (i == j);
         int n = matches.sum().item<int>();
@@ -69,7 +70,8 @@ torch::Tensor v8DetectionLossImpl::preprocess(torch::Tensor targets,
     out_scale.mul_(scale_tensor);
     auto out_scale_xyxy = xywh2xyxy(out_scale);
     out.index_put_({ "...", torch::indexing::Slice(1, 5) }, out_scale_xyxy);
-
+    // std::cout << "out: " << out[0][0] << std::endl;  //已经验证输入数据一致
+    // std::cout << "out: " << out[batch_size-1][0] << std::endl;
     return out;
 }
 
@@ -99,14 +101,11 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     torch::Dict<std::string, torch::Tensor>& batch)
 {
     auto loss = torch::zeros({ 3 }).to(device); // box, cls, dfl
-    /*
-        feats = preds[1] if isinstance(preds, tuple) else preds
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, self.nc), 1)
-    */
+
     std::vector<torch::Tensor> feats = preds;
     std::vector<torch::Tensor> views;
     int feats0_size0 = feats[0].size(0);
+
     #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
     // 2025-10-29 输出测试数据给pytorch代码，pytorch中用torch.jit.load读取
     if(save_tensor_firsttime)
@@ -131,6 +130,7 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     for (int i = 0; i < feats.size(); i++)
     {
         #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+#if 0        
         if(std::get<bool>(hyp->at("use_unified_batch")))
         {
             auto xi = load_tensordata_from_file("preds" + std::to_string(i) + ".pt");
@@ -142,6 +142,7 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
                 std::cout <<" feats{ " << i << "} copy data from file" << std::endl;
             }
         }
+#endif        
         #endif
         views.push_back(feats[i].view({ feats0_size0, this->no, -1 }));
     }
@@ -157,10 +158,18 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     auto dtype = pred_scores.dtype();
     auto batch_size = pred_scores.size(0);
     auto feats0_shape = feats[0].sizes();
-    torch::Tensor img_size = torch::tensor(feats0_shape.slice(2),
+    torch::Tensor imgsz = torch::tensor(feats0_shape.slice(2),
         torch::TensorOptions().dtype(dtype).device(device));
-    img_size = img_size * stride[0];
+    imgsz = imgsz * stride[0];
+
+    // std::cout << "dtype: " << dtype << " batch_size: " << batch_size << 
+    //     " imgsz: " << imgsz << " " << imgsz.dtype() << std::endl;
+
     auto [anchor_points, stride_tensor] = make_anchors(feats, this->stride, 0.5f);
+
+    // std::cout << "anchor_points: " << anchor_points.sizes() << " stride_tensor " << stride_tensor.sizes() << std::endl;
+    // std::cout << "anchor_points: " << anchor_points[0] << " " << anchor_points[1000] << std::endl;
+    // std::cout << "stride_tensor: " << stride_tensor[0] << " " << stride_tensor[1000] << std::endl;
 
     // Targets
     auto targets = torch::cat({ batch.at("batch_idx").view({-1, 1}),
@@ -171,8 +180,8 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim = True).gt_(0.0)
     */
-    //std::cout << "img_size: " << img_size << std::endl;
-    auto scale_tensor = img_size.index({torch::tensor({ 1, 0, 1, 0 })});
+
+    auto scale_tensor = imgsz.index({torch::tensor({ 1, 0, 1, 0 })});
     targets = targets.to(this->device);
     targets = preprocess(targets, batch_size, scale_tensor);    // [bs, -1, 6] ==> [bs, -1, 5]
     auto targets_split = targets.split({ 1, 4 }, 2);
@@ -191,14 +200,35 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
                                                                 gt_bboxes,
                                                                 mask_gt);
     //std::cout << "4 -- assigner over...\n";
+#if 0    
+    if(std::get<bool>(hyp->at("debug_loss_enable")))
+    {
+        pred_distri = load_tensordata_from_file("pred_distri.pt");
+        pred_bboxes = load_tensordata_from_file("pred_bboxes.pt");
+        anchor_points = load_tensordata_from_file("anchor_points.pt");
+        target_bboxes = load_tensordata_from_file("target_bboxes.pt");
+        target_scores = load_tensordata_from_file("target_scores.pt");
+        fg_mask = load_tensordata_from_file("fg_mask.pt");
 
+        std::cout << "load pred_distri... form file." << std::endl;
+    }
+#endif
     // 正负样本都参与了损失计算
     float target_scores_sum = std::max(target_scores.sum().item<float>(), 1.0f);
+
     loss[1] = this->bce->forward(pred_scores, target_scores.to(dtype)).sum().item<float>() / target_scores_sum;
     //std::cout << "cls loss: " << loss[1] << std::endl;
-    //std::cout << "5 -- bce over...\n";        
+    //std::cout << "5 -- bce over...\n";    
+    // std::cout << "fg_mask: " << fg_mask.sizes() << " " << fg_mask.sum() << std::endl;    
     if (fg_mask.sum().item().toInt())
     {
+        // std::cout << "pred_distri: " << pred_distri.sizes() << std::endl;
+        // std::cout << "pred_bboxes: " << pred_bboxes.sizes() << std::endl;
+        // std::cout << "anchor_points: " << anchor_points.sizes() << std::endl;
+        // std::cout << "target_bboxes: " << target_bboxes.sizes() << std::endl;
+        // std::cout << "target_scores: " << target_scores.sizes() << std::endl;
+        // std::cout << "target_scores_sum: " << target_scores_sum << std::endl;
+
         target_bboxes /= stride_tensor;
         auto [tmp_lbox, tmp_ldfl] = bbox_loss->forward(
             pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores,

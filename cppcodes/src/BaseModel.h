@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <torch/torch.h>
 #include <string>
 #include <variant>
@@ -28,14 +28,19 @@ public:
 // s: 要根据情况决定，包含了None True False nearest nc, anchors等
 using arg_complex = std::variant<int, std::string, bool, float>;
 
-class BaseModule : public torch::nn::Module, std::enable_shared_from_this<BaseModule>
+class BaseModule : public torch::nn::Module
 {
 public:
-    BaseModule(){};
-    ~BaseModule(){};
-
-    virtual torch::Tensor forward(std::vector<torch::Tensor> x) = 0;
-    virtual torch::Tensor forward(torch::Tensor x) = 0;
-    virtual int get_outchannels() = 0;   
-    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) = 0; 
+    virtual torch::Tensor forward(std::vector<torch::Tensor> x)
+    {
+        LOG(ERROR) << "this is template class function forward(vector).";
+        return x[0];
+    }
+    virtual torch::Tensor forward(torch::Tensor x)
+    {
+        LOG(ERROR) << "this is template class function forward.";
+        return x;
+    }
+    virtual int get_outchannels() = 0;
+    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) = 0;
 };

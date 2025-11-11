@@ -30,3 +30,5 @@ public:
     float decay_;
     int updates_ = 0;
 };    
+
+void module_sub_info(torch::nn::Module& sub_module, const std::string key, int sub_step);

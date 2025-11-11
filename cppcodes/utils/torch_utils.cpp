@@ -185,7 +185,7 @@ ModelEMA::ModelEMA(std::shared_ptr<Model> ptr_model, float decay, int updates)
     auto model = ptr_model->get();
     // const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels, bool showdebuginfo
     ema_model_ = std::make_shared<Model>(model->cfgfile, model->n_classes, 
-        model->image_width, model->image_height, model->n_channels, model->b_showdebug);
+        model->image_width, model->image_height, model->n_channels, nullptr);
     (*ema_model_)->eval();
 
     for (auto& param : (*ema_model_)->parameters()) {
@@ -222,5 +222,31 @@ void ModelEMA::update(torch::nn::Module& model)
                 param.value().data().copy_(v.data());
             }
         }
+    }
+}
+
+
+void module_sub_info(torch::nn::Module& sub_module, const std::string key, int sub_step) 
+{
+    std::stringstream ss;
+    for (int i = 0; i <= sub_step; i++)
+        ss << "  ";
+    std::stringstream ss_info;
+    if (sub_module.named_children().size())
+    {
+        std::cout << ss.str() <<  key << " " << sub_module.name() << " (" << std::endl;
+        for (auto m : sub_module.named_children())
+        {
+            module_sub_info(*(m.value()), m.key(), sub_step + 1);
+        }
+        std::cout << ss.str() << ")" << std::endl;
+    }
+    else
+    {
+        sub_module.pretty_print(ss_info);
+        if (ss_info.str().length())
+            std::cout << ss.str()<<  key << " "  << ss_info.str() << std::endl;
+        else
+            std::cout << ss.str()<<  key << " "  << sub_module.name() << std::endl;
     }
 }

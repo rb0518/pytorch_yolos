@@ -4,6 +4,12 @@
 #include <cmath>
 
 //=================  nnUpsampleImpl ================================
+
+nnUpsampleImpl::nnUpsampleImpl(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    set_params(in_channels, number, args);
+}
+
 void nnUpsampleImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     in_ch = in_channels;
@@ -39,11 +45,6 @@ void nnUpsampleImpl::set_params(int in_channels, int number, std::vector<arg_com
 #endif
 }
 
-torch::Tensor nnUpsampleImpl::forward(std::vector<torch::Tensor> x)
-{
-    LOG(ERROR) << "This module not accept mult-input";
-    return x[0];
-}
 torch::Tensor nnUpsampleImpl::forward(torch::Tensor x)
 {
     
@@ -70,11 +71,6 @@ void ContractImpl::set_params(int in_channels, int number, std::vector<arg_compl
     out_ch = in_channels * gain * gain;
 }
 
-torch::Tensor ContractImpl::forward(std::vector<torch::Tensor> x)
-{
-    LOG(ERROR) << "This module not accept mult-input";
-    return x[0];
-}
 torch::Tensor ContractImpl::forward(torch::Tensor x)
 {
     auto b = x.size(0);  // (1, 64, 80, 80)
@@ -94,11 +90,6 @@ void ExpandImpl::set_params(int in_channels, int number, std::vector<arg_complex
     out_ch = in_channels / (gain * gain);
 }
 
-torch::Tensor ExpandImpl::forward(std::vector<torch::Tensor> x)
-{
-    LOG(ERROR) << "This module not accept mult-input";
-    return x[0];
-}
 torch::Tensor ExpandImpl::forward(torch::Tensor x)
 {
     auto b = x.size(0);  // (1, 64, 80, 80)
@@ -110,3 +101,45 @@ torch::Tensor ExpandImpl::forward(torch::Tensor x)
     x_ret = x_ret.permute({0, 3, 4, 1, 5, 2}).contiguous(); // x(1,16, 80,2,80, 2)
     return x_ret.view({b, c/gain_pow2, h * gain, w * gain});   // (1, 16, 160, 160)
 }
+
+#if 0
+/*
+* pytorch 原函数下注释为
+   r"""Applies the Gaussian Error Linear Units function.
+
+    .. math:: \text{GELU}(x) = x * \Phi(x)
+
+    where :math:`\Phi(x)` is the Cumulative Distribution Function for Gaussian Distribution.
+
+    When the approximate argument is 'tanh', Gelu is estimated with:
+
+    .. math:: \textx * ({GELU}(x) = 0.5 * 1 + \text{Tanh}(\sqrt{2 / \pi} * (x + 0.044715 * x^3)))
+
+    Args:
+        approximate (str, optional): the gelu approximation algorithm to use:
+            ``'none'`` | ``'tanh'``. Default: ``'none'``
+
+    Shape:
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(*)`, same shape as the input.
+
+    .. image:: ../scripts/activation_images/GELU.png
+
+    Examples::
+
+        >>> m = nn.GELU()
+        >>> input = torch.randn(2)
+        >>> output = m(input)
+    """
+   网上查资料
+*/
+
+torch::Tensor GELUImpl::forward(torch::Tensor x)
+{
+    //精度要求不高的近似解如下：
+    //return 0.5 * x * (1 + torch::tanh(std::sqrt(2 / M_PI) * (x + 0.044715 * torch::pow(x, 3)));
+    // 标准公式代码如下：
+    return x * 0.5 * (1 + torch::erf(x * std::sqrt(2)));
+
+}
+#endif

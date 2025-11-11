@@ -36,7 +36,7 @@ public:
 	virtual void save_model() {};
 	virtual void load_model() {};
 protected:
-	void build_optiomizer(int nc, std::string optim_name, 
+	std::shared_ptr<torch::optim::Optimizer> build_optiomizer(int nc, std::string optim_name,
 		float _lr, float _momentum, float _decay, int iterations);
 	void save_batch_sample_image(int epoch, int base_epoch, int start_epoch,
 		torch::Tensor data, torch::Tensor targets);
@@ -58,7 +58,9 @@ protected:
 
 	torch::Device device = torch::Device(torch::kCPU);
 	Model model{ nullptr };
+
 	std::shared_ptr<torch::optim::Optimizer> optimizer;
+
 	std::string optimizer_name;
 	DataloaderBase* train_loader;
 

@@ -106,7 +106,7 @@ Dataloader_Custom test(
             LOG(ERROR) << "weights file: " << weights << " not exist." ;
             return nullptr;
         }
-        model_tmp = std::make_shared<ModelImpl>(cfg_file, nc, imgsz, imgsz, 3, false);
+        model_tmp = std::make_shared<ModelImpl>(cfg_file, nc, imgsz, imgsz, 3, &args);
         model_ptr = model_tmp.get();
         torch::serialize::InputArchive ckpt_in;
         ckpt_in.load_from(weights_file); // model optim epoch
@@ -489,7 +489,7 @@ void BaseValidator::setup_model()
         imgsz = std::get<int>(args["imgsz"]);
         YAML::Node cfgs = YAML::LoadFile(cfg_file);
         nc = cfgs["nc"].as<int>();
-        model_ptr = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3);
+        model_ptr = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, &args);
         if (model_ptr == nullptr)
         {
             LOG(ERROR) << "model init error.\n";

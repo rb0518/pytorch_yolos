@@ -48,7 +48,7 @@ std::function<float(int)> create_lr_lambda(bool linear_lr, float lrf, int epochs
     if (linear_lr) {
         // 线性插值
         return [lrf, epochs](int x) -> float {
-            return (1.0f - static_cast<float>(x) / (epochs - 1)) * (1.0f - lrf) + lrf;
+            return (1.0f - static_cast<float>(x) / (epochs)) * (1.0f - lrf) + lrf;
             };
     }
     else {
@@ -227,7 +227,10 @@ BaseTrainer::BaseTrainer(std::string _root, VariantConfigs cfg_default)
 
     init_dirs();
     setup_model();
+
     load_pretrained();
+
+    freeze_modules();
 
     init_dataloader();
 
@@ -326,12 +329,12 @@ void BaseTrainer::setup_model()
         exit(-1);
     }
     auto imgsz = std::get<int>(args["imgsz"]);
-    model = Model(cfg_file, 80, imgsz, imgsz, 3);
+    model = Model(cfg_file, 80, imgsz, imgsz, 3, &args);
     std::cout << "Model create in trainbase over.\n";
     model->set_args_prt(&args); // 传递指针，适应全局变量需要
     std::cout << "Model set args over.\n";
 
-    model->show_modelinfo();
+    model->show_modelinfo(std::get<bool>(args["debug_show_info"]));
     model->to(device);
 }
 
@@ -402,12 +405,12 @@ void BaseTrainer::setup_optimizer()
     std::cout << " new weigth_decay : " << weight_decay << " iterations: " << iterations << "name: " << name << std::endl;
 
 
-    build_optiomizer(model->n_classes, name, lr, momentum, weight_decay, iterations);
-   if(name == "auto")
+    this->optimizer = build_optiomizer(model->n_classes, name, lr, momentum, weight_decay, iterations);
+    if(name == "auto")
        args["warmup_bias_lr"] = 0.0f;
 }
 
-void BaseTrainer::build_optiomizer(int nc,std::string optim_name, 
+std::shared_ptr<torch::optim::Optimizer> BaseTrainer::build_optiomizer(int nc,std::string optim_name, 
     float _lr, float _momentum, float _decay, int iterations)
 {
     std::string name = optim_name;
@@ -442,124 +445,96 @@ void BaseTrainer::build_optiomizer(int nc,std::string optim_name,
     }
 
     std::vector<torch::Tensor> pg0, pg1, pg2;
-    for (const auto& module : model->named_children())
+    for (auto& pair : model->named_parameters())
     {
-        for (auto pair : module.value()->named_parameters())
+        if (pair.key().find(".bias") != std::string::npos) // no decay
+            pg2.push_back(pair.value());
+        else if (pair.key().find(".weight") != std::string::npos) 
         {
-            //std::cout << pair.key() <<": " << module.key() << " " << module.value()->name() << std::endl;
-            if (pair.key().find(".bias") != std::string::npos) // no decay
-                pg2.push_back(pair.value());
-            else if (pair.key().find(".weight") != std::string::npos) {
-                //if (auto* bn_module = module.value()->as<torch::nn::BatchNorm2d>())
-                if (pair.key().find("bn.weight") != std::string::npos)
-                    pg1.push_back(pair.value());  // no decay
-                else
-                    pg0.push_back(pair.value());  // with decay
-            }
+            if (pair.key().find("bn.weight") != std::string::npos)
+                pg1.push_back(pair.value());  // no decay
+            else
+                pg0.push_back(pair.value());  // with decay
         }
     }
 
-    if (name == "SGD")
-    {
-        std::cout << "SGD" << " lr0 " << lr << std::endl;
-        optimizer = std::make_shared<torch::optim::SGD>(
-            pg2, torch::optim::SGDOptions(lr)
-            .momentum(momentum)
-            .nesterov(true).weight_decay(0.0));
-
-        if (!pg0.empty()) {
-            std::unique_ptr<torch::optim::SGDOptions> pg0_options = std::make_unique<torch::optim::SGDOptions>(lr);
-            pg0_options->weight_decay(decay);
-            torch::optim::OptimizerParamGroup paramgroup_pg0(pg0);
-            paramgroup_pg0.set_options(std::move(pg0_options));
-
-            optimizer->add_param_group(paramgroup_pg0);
-        }
-        if (!pg1.empty()) {
-            std::unique_ptr<torch::optim::SGDOptions> pg1_options = std::make_unique<torch::optim::SGDOptions>(lr);
-            pg1_options->weight_decay(0.0);
-            torch::optim::OptimizerParamGroup paramgroup_pg1(pg1);
-            paramgroup_pg1.set_options(std::move(pg1_options));
-
-            optimizer->add_param_group(paramgroup_pg1);
-        }
-    }
-    else if (name == "RMSProp")
-    {
-        std::cout << "SGD" << " lr0 " << lr << std::endl;
-        optimizer = std::make_shared<torch::optim::RMSprop>(
-            pg2, torch::optim::RMSpropOptions(lr)
-            .momentum(momentum).weight_decay(0.0));
-
-        if (!pg0.empty()) {
-            std::unique_ptr<torch::optim::RMSpropOptions> pg0_options = std::make_unique<torch::optim::RMSpropOptions>(lr);
-            pg0_options->weight_decay(decay);
-            torch::optim::OptimizerParamGroup paramgroup_pg0(pg0);
-            paramgroup_pg0.set_options(std::move(pg0_options));
-
-            optimizer->add_param_group(paramgroup_pg0);
-        }
-        if (!pg1.empty()) {
-            std::unique_ptr<torch::optim::RMSpropOptions> pg1_options = std::make_unique<torch::optim::RMSpropOptions>(lr);
-            pg1_options->weight_decay(0.0);
-            torch::optim::OptimizerParamGroup paramgroup_pg1(pg1);
-            paramgroup_pg1.set_options(std::move(pg1_options));
-            optimizer->add_param_group(paramgroup_pg1);
-        }
-    }
-    else if (name == "AdamW")
-    {
-        std::cout << "AdamW" << " lr0 " << lr << std::endl;
-        auto adamw_option = torch::optim::AdamWOptions(lr).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
-        optimizer = std::make_shared<torch::optim::AdamW>(
-            pg2, adamw_option);
-
-        if (!pg0.empty()) {
-            std::unique_ptr<torch::optim::AdamWOptions> pg0_options = std::make_unique<torch::optim::AdamWOptions>(lr);
-            pg0_options->weight_decay(decay);
-            torch::optim::OptimizerParamGroup paramgroup_pg0(pg0);
-            paramgroup_pg0.set_options(std::move(pg0_options));
-
-            optimizer->add_param_group(paramgroup_pg0);
-        }
-
-        if (!pg1.empty()) {
-            std::unique_ptr<torch::optim::AdamWOptions> pg1_options = std::make_unique<torch::optim::AdamWOptions>(lr);
-            pg1_options->weight_decay(0.0);
-            torch::optim::OptimizerParamGroup paramgroup_pg1(pg1);
-            paramgroup_pg1.set_options(std::move(pg1_options));
-            optimizer->add_param_group(paramgroup_pg1);
-        }
-    }
-    else {  // 其它情况:Adam, Adamax, NAdam RAdam在optim中没有，均用Adam
+    if (name == "Adamax" || name == "Adamax" || name == "NAdam" || name == "NAdam")// 其它情况:Adam, Adamax, NAdam NAdam在optim中没有，均用Adam
         name = "Adam";
-        std::cout << "Adam" << " lr0 " << lr << std::endl;
-        auto adam_option = torch::optim::AdamOptions(lr).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
-        optimizer = std::make_shared<torch::optim::Adam>(
-            pg2, adam_option);
 
-        if (!pg0.empty()) {
-            std::unique_ptr<torch::optim::AdamOptions> pg0_options = std::make_unique<torch::optim::AdamOptions>(lr);
-            pg0_options->weight_decay(decay);
-            torch::optim::OptimizerParamGroup paramgroup_pg0(pg0);
-            paramgroup_pg0.set_options(std::move(pg0_options));
-
-            optimizer->add_param_group(paramgroup_pg0);
-        }
-
-        if (!pg1.empty()) {
-            std::unique_ptr<torch::optim::AdamOptions> pg1_options = std::make_unique<torch::optim::AdamOptions>(lr);
-            pg1_options->weight_decay(0.0);
-            torch::optim::OptimizerParamGroup paramgroup_pg1(pg1);
-            paramgroup_pg1.set_options(std::move(pg1_options));
-            optimizer->add_param_group(paramgroup_pg1);
-        }
-    }
     optimizer_name = name;
     std::cout << ColorString("optimizer: ", "info") << name << " (lr = " << lr
         << " momentum: " << momentum << ") with parameter groups g[1]: "
         << pg1.size() << " weight(decay=0.0) g[0]: " << pg0.size() << " weight(decay = "
         << decay << " ) g[2]: " << pg2.size() << " bias(decay=0.0)" << std::endl;
+
+    std::vector<torch::optim::OptimizerParamGroup> paramgroups;
+    if (name == "SGD")
+    {
+        auto pg2_options = torch::optim::SGDOptions(lr).momentum(momentum).nesterov(true).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg2,
+            std::make_unique<torch::optim::SGDOptions>(pg2_options)));
+
+        auto pg0_options = torch::optim::SGDOptions(lr).weight_decay(decay);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg0,
+            std::make_unique<torch::optim::SGDOptions>(pg0_options)));
+
+        auto pg1_options = torch::optim::SGDOptions(lr).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg1,
+            std::make_unique<torch::optim::SGDOptions>(pg1_options)));
+
+        return std::make_shared<torch::optim::SGD>(paramgroups, pg2_options);
+    }
+    else if (name == "RMSProp")
+    {
+        auto pg2_options = torch::optim::RMSpropOptions(lr).momentum(momentum).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg2,
+            std::make_unique<torch::optim::RMSpropOptions>(pg2_options)));
+
+        auto pg0_options = torch::optim::RMSpropOptions(lr).weight_decay(decay);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg0,
+            std::make_unique<torch::optim::RMSpropOptions>(pg0_options)));
+
+        auto pg1_options = torch::optim::RMSpropOptions(lr).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg1,
+            std::make_unique<torch::optim::RMSpropOptions>(pg1_options)));
+
+        return std::make_shared<torch::optim::RMSprop>(paramgroups, pg2_options);
+    }
+    else if (name == "AdamW")
+    {
+        auto pg2_options = torch::optim::AdamWOptions(lr).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg2,
+            std::make_unique<torch::optim::AdamWOptions>(pg2_options)));
+
+        auto pg0_options = torch::optim::AdamWOptions(lr).weight_decay(decay);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg0,
+            std::make_unique<torch::optim::AdamWOptions>(pg0_options)));
+
+        auto pg1_options = torch::optim::AdamWOptions(lr).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg1,
+            std::make_unique<torch::optim::AdamWOptions>(pg1_options)));
+
+        return std::make_shared<torch::optim::AdamW>(paramgroups, pg2_options);
+    }
+    else if (name == "Adam"){  // 可以作为if else分支default，确保总有一个有效值传回
+        auto pg2_options = torch::optim::AdamOptions(lr).betas(std::make_tuple(momentum, 0.999)).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg2,
+            std::make_unique<torch::optim::AdamOptions>(pg2_options)));
+
+        auto pg0_options = torch::optim::AdamOptions(lr).weight_decay(decay);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg0,
+            std::make_unique<torch::optim::AdamOptions>(pg0_options)));
+
+        auto pg1_options = torch::optim::AdamOptions(lr).weight_decay(0.0);
+        paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg1,
+            std::make_unique<torch::optim::AdamOptions>(pg1_options)));
+
+        return std::make_shared<torch::optim::Adam>(paramgroups, pg2_options);
+    }
+    else
+        LOG(ERROR) << "Not support you set optimizer type: " << name;
+
+    return nullptr;
 }
 
 void BaseTrainer::setup_scheduler()
@@ -596,7 +571,6 @@ void BaseTrainer::save_batch_sample_image(int epoch, int base_epoch, int start_e
     }
 }
 
-
 void BaseTrainer::do_train()
 {
     int nb = train_loader->get_total_samples(true); // number of batchs
@@ -609,9 +583,100 @@ void BaseTrainer::do_train()
     int base_epochs = epochs - std::get<int>(args["close_mosaic"]);
     int ni = 0;
     std::shared_ptr<v8DetectionLossImpl> compute_loss = std::make_shared<v8DetectionLossImpl>(model.ptr());
+    // check parameters and optimizer params
+    std::vector<torch::Tensor> pg0, pg1, pg2;
+    for (auto& pair : model->named_parameters())
+    {
+        if (pair.key().find(".bias") != std::string::npos) // no decay
+            pg2.push_back(pair.value());
+        else if (pair.key().find(".weight") != std::string::npos) 
+        {
+            if (pair.key().find("bn.weight") != std::string::npos)
+                pg1.push_back(pair.value());  // no decay
+            else
+                pg0.push_back(pair.value());  // with decay
+        }
+    }
 
+    for (size_t j = 0; j < optimizer->param_groups().size(); j++)
+    {
+        auto opt_params = optimizer->param_groups()[j].params();
+        std::vector<torch::Tensor> params;
+        if (j == 0)
+            params = pg2;
+        else if(j == 1)
+            params = pg0;
+        else
+            params = pg1;
+
+        
+        std::cout << "check parameters " << j <<" params size: " << params.size() << " optim param_group size " << opt_params.size() << std::endl;
+        int erro_count = 0;
+        if (params.size() != opt_params.size())
+            std::cout << "size wrong....:" << params.size() << " " << opt_params.size() << std::endl;
+        for (int i = 0; i < std::min(params.size(), opt_params.size()); i++)
+        {
+            if (params[i].data_ptr() != opt_params[i].data_ptr())
+            {
+                erro_count += 1;
+                std::cout << "data address not equil.." << std::endl;
+            }
+
+            if (opt_params[i].requires_grad() == false)
+                std::cout << j << "-" << i << opt_params[i].name() << " no grad." << std::endl;
+            if(params[i].requires_grad() == false)
+                std::cout << j << "-" << i << params[i].name() <<  " no grad." << std::endl;
+
+        }
+        std::cout << "check group " << j << " error: " << erro_count << std::endl;
+    }
+
+
+#if 0
+    int num_params = 0;
+    int num_params_grad = 0;
+    for (auto param : model->parameters())
+    {
+        num_params += param.numel();
+        if (param.requires_grad())
+            num_params_grad += param.numel();
+    }
+
+    std::cout << "Model layer: " << model->modules(false).size() << 
+        " parameters: " << num_params <<
+        " gradient: " << num_params_grad << std::endl;
+
+    std::cout << "Name modules: " << model->named_modules().size() << std::endl;
+
+
+    if(std::get<bool>(args["enable_step_debug"]))
+    {
+        YoloCustomExample batch;
+        batch.insert("img", load_tensordata_from_file("test_img.pt"));
+        batch.insert("batch_idx", load_tensordata_from_file("test_batch_idx.pt"));
+        batch.insert("cls", load_tensordata_from_file("test_cls.pt"));
+        batch.insert("bboxes", load_tensordata_from_file("test_bboxes.pt"));
+
+        std::vector<torch::Tensor> preds;
+        preds.push_back(load_tensordata_from_file("preds0.pt"));
+        preds.push_back(load_tensordata_from_file("preds1.pt"));
+        preds.push_back(load_tensordata_from_file("preds2.pt"));
+        preds[0] = preds[0].to(device);
+        preds[1] = preds[1].to(device);
+        preds[2] = preds[2].to(device);
+        std::cout << "use unified batch data load over.\n";   
+        for(int test_time = 0; test_time < 5; test_time++)
+        {
+            auto [l, i] = compute_loss->forward(preds, batch);
+            std::cout << "loss: " << l << " item: " << i << std::endl;
+            printf("%16.15f \n", l.item().toFloat());
+        }
+        return;
+    }
+#endif
     std::cout << ColorString("Start training:") << ", start_epoch: " << start_epochs <<" end epochs: " << epochs << " number of batch: " << nb << std::endl;
     optimizer->zero_grad();
+
     for (int epoch = start_epochs; epoch < epochs; epoch++)
     {
         train_loader->cloase_mosaic(epoch >= base_epochs);       
@@ -641,16 +706,22 @@ void BaseTrainer::do_train()
             if (ni <= nw)
                 do_warmup(epoch, ni, nw, nbs, train_loader->get_batch_size());
 
-            #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
+
+#if 1            
             if(std::get<bool>(args["use_unified_batch"]))
             {
-                batch.insert("img", load_tensordata_from_file("test_img.pt"));
-                batch.insert("batch_idx", load_tensordata_from_file("test_batch_idx.pt"));
-                batch.insert("cls", load_tensordata_from_file("test_cls.pt"));
-                batch.insert("bboxes", load_tensordata_from_file("test_bboxes.pt"));
+                std::string img_name = "test_img_0_"+std::to_string(idx_epoch)+".pt";
+                std::string batch_idx_name = "test_batch_idx_0_"+std::to_string(idx_epoch)+".pt";
+                std::string cls_name = "test_cls_0_"+std::to_string(idx_epoch)+".pt";
+                std::string bboxes_name = "test_bboxes_0_"+std::to_string(idx_epoch)+".pt";
+                batch.insert("img", load_tensordata_from_file(img_name));
+                batch.insert("batch_idx", load_tensordata_from_file(batch_idx_name));
+                batch.insert("cls", load_tensordata_from_file(cls_name));
+                batch.insert("bboxes", load_tensordata_from_file(bboxes_name));
                 std::cout << "use unified batch data over.\n";
             }
-            #endif
+#endif            
+
             auto prepro_data = preprocess_batch(batch);
 
             int num_targets = prepro_data[1].size(0);
@@ -669,13 +740,14 @@ void BaseTrainer::do_train()
 
             if((ni - last_opt_step) > accumulate)
             {
+                //torch::nn::utils::clip_grad_norm_(model->parameters(), 10.0);
                 optimizer->step();
                 optimizer->zero_grad();
                 last_opt_step = ni;
             }
             auto vc_lrs = scheduler->get_curstep_lrs();
             char temp_str[200];
-            sprintf(temp_str, "lr0: %lf lr1: %lf lr2: %lf", vc_lrs[0], vc_lrs[1], vc_lrs[2]);
+            sprintf(temp_str, "lr0: %lf lr1: %lf lr2: %lf %d %d", vc_lrs[0], vc_lrs[1], vc_lrs[2], accumulate, last_opt_step);
 
 
             pbar.set_suffix(std::string(temp_str));
@@ -731,10 +803,11 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
     xi.push_back(float(nw));
     auto lr_lambda = create_lr_lambda(std::get<bool>(args["cos_lr"]), std::get<float>(args["lrf"]), epochs);
 
-    accumulate = std::roundf(std::max(1.f, linear_interp(ni, xi, { 1.f, float(nbs / batch_size) })));
+    //accumulate = std::roundf(std::max(1.f, linear_interp(ni, xi, { 1.f, float(nbs / batch_size) })));
 
     for (size_t j = 0; j < optimizer->param_groups().size(); j++)
     {
+        // # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
         float start_lr = (j == 0) ? std::get<float>(args["warmup_bias_lr"]) : 0.0f;
         float end_lr = std::get<float>(args["lr0"]) * lr_lambda(epoch);     // python原代码中x["initial_lr"] C++中没有找到
         std::vector<float> fp = { start_lr, end_lr };
@@ -742,37 +815,23 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
 
         //x.options().set_lr(double(linear_interp(float(ni), xi, fp)));
         auto& options = optimizer->param_groups()[j].options();
-        double old_lr = optimizer->param_groups()[j].options().get_lr();
 
-        if (j == 0)     // 初始化时只有这个是设置了的momentum
+        auto m = linear_interp(ni, xi, {
+        std::get<float>(args["warmup_momentum"]),
+        std::get<float>(args["momentum"])
+            });
+
+        if (auto sgd_options = dynamic_cast<torch::optim::SGDOptions*>(&options))
         {
-            auto m = linear_interp(ni, xi, {
-            std::get<float>(args["warmup_momentum"]),
-            std::get<float>(args["momentum"])
-                });
-
-            if (auto sgd_options = dynamic_cast<torch::optim::SGDOptions*>(&options))
-            {
-                std::cout << "init as sgd. \n";
-                sgd_options->momentum(m);
-            }
-            /*
-            else if (auto adamw_options = dynamic_cast<torch::optim::AdamWOptions*>(&options))
-            {
-                std::cout << "init as adamw. \n";
-                adamw_options->betas(std::make_tuple(m, 0.999));
-            }
-            else if (auto adam_options = dynamic_cast<torch::optim::AdamOptions*>(&options))
-            {
-                std::cout << "init as adam. \n";
-                adam_options->betas(std::make_tuple(m, 0.999));
-            }
-            */
-            else if (auto rmsprop_options = dynamic_cast<torch::optim::RMSpropOptions*>(&options))
-            {
-                std::cout << "init as RMSProp.\n";
-                rmsprop_options->momentum(m);
-            }
+            sgd_options->momentum(m);
+            // std::cout << "new momentum: " << sgd_options->momentum() <<" weight_decay: " <<
+            //    sgd_options->weight_decay() << std::endl;
+        }
+        else if (auto rmsprop_options = dynamic_cast<torch::optim::RMSpropOptions*>(&options))
+        {
+            rmsprop_options->momentum(m);
+            // std::cout << "new momentum: " << sgd_options->momentum() <<" weight_decay: " <<
+            //    sgd_options->weight_decay() << std::endl;
         }
     }
 }
@@ -781,7 +840,10 @@ std::string BaseTrainer::refresh_batch_end_info(int epoch, int epochs, int idx, 
 	torch::Tensor& loss, torch::Tensor& mloss, torch::Tensor& loss_items)
 {
     mloss.to(loss_items.device());
-    mloss = (mloss * idx + loss_items) / float(idx + 1);
+    if(idx == 0)
+        mloss = loss_items.clone();
+    else
+        mloss = (mloss * idx + loss_items) / float(idx + 1);
     char temp_cstr[120];
     sprintf(temp_cstr, "%4d-%-4d%7d%10.5f %10.5f %10.5f %10.5f%6d", (epoch+1), epochs, idx,
         loss.item().toFloat(),
