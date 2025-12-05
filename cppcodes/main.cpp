@@ -24,13 +24,18 @@
 #include "progressbar.h"
 #include "SpecTest.h"
 
+#include "nms.h"
+
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+
 // jit_weights如果设置了，就会先调用pretrain从torchscript,除了代码调试，默认应为""
 // 仿yolov5中代码，FLAGS_weights和FLAGS_jit_weights各取一
 DEFINE_string(runtype,  "train",                "runtype: [train, predict, jit]");
 
 // 对应Yolov5-5.0代码
 DEFINE_string(weights,  "",                     "initial weight path");
-DEFINE_string(cfg,      "models/11/yolo11.yaml",  "model.yaml path");
+DEFINE_string(model,    "models/11/yolo11.yaml",  "model.yaml path");
 DEFINE_string(data,     "data/coco128.yaml",    "data.yaml path");
 DEFINE_string(hyp,      "data/hyp.scratch.yaml","hyperparameters path");
 
@@ -71,10 +76,113 @@ DEFINE_bool(is_segment, false, "predict or jit runtype");
 // 约定script.pt是train export， torchscript.pt是eval导出
 DEFINE_string(jit_weights,  "", "path to pytorch pt file");             // load pytorch pretrained weights, must be script export
 
+/*
+    测试cublas库是否正确初始化
+*/
+bool init_cublas()
+{
+    cudaSetDevice(0);
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    cublasHandle_t handle;
+    cublasStatus_t status = cublasCreate(&handle);
+    if (status != CUBLAS_STATUS_SUCCESS)
+    {
+        std::cerr << " cuBlas initialization failed." << std::endl;
+        return false;
+    }
+
+    cublasDestroy(handle);
+    cudaStreamDestroy(stream);
+
+    return true;
+}
+
+bool get_task_from_filename(std::string root, std::string model_sets, 
+    std::string& task_s, std::string& scale_id)
+{
+    auto get_task = [&](std::string filename) -> std::tuple<bool, std::string, std::string> {
+        auto [name_ok, version, scale, task] = parse_yolo_config(filename);
+        if(name_ok)
+        {
+            if(version != 5 && version != 11 && version != 12 && version !=13)
+            {
+                LOG(ERROR) << "only complete support v5, v11, v12.";
+                name_ok =false;
+            }
+
+            if(task == "")
+                task = "detect";
+            if(scale == "")
+                scale = "n";
+        }
+        else{
+            LOG(ERROR) << FLAGS_model << " not right, or we can't support you input file.";
+            name_ok =false;
+        }
+
+        return std::make_tuple(name_ok, task, scale);
+    };
+
+    bool get_task_ok = true;
+    std::string file_ext = std::filesystem::path(model_sets).extension().string();
+    std::string task_name;
+    std::string scale_key;
+    if(file_ext == ".pt")   // 指定的是pt文件 
+    {
+        if(std::filesystem::exists(std::filesystem::path(root).append(model_sets)))
+        {
+            torch::serialize::InputArchive in_arch;
+            in_arch.load_from(std::filesystem::path(root).append(model_sets).string());
+            std::cout << "load ptfile get keys: " << in_arch.keys() << std::endl;
+            c10::IValue i_task;
+            
+            if(in_arch.try_read("task", i_task))
+            {
+                task_s = i_task.toStringRef();
+            }
+            else
+                get_task_ok = false;
+
+            c10::IValue i_scale;
+            if(in_arch.try_read("scale", i_scale))
+            {
+                scale_id = i_task.toStringRef();
+            }
+            else
+                get_task_ok = false;
+        }
+        else
+        {
+            std::cout << "not found file: " << std::filesystem::path(root).append(model_sets).string() << std::endl;
+            get_task_ok = false;
+        }
+    }
+    else if(file_ext == ".yaml")
+    {   // 从文件名推断yolo任务
+        auto [name_ok, task, scale] = get_task(std::filesystem::path(model_sets).filename().string());
+        if(name_ok)
+        {
+            task_s = task;
+            scale_id = scale;
+        }
+        else
+            get_task_ok = false;
+    }
+    else{
+        LOG(ERROR) << "Can't get task info from file: " << model_sets;
+        get_task_ok = false;
+    }
+
+    return get_task_ok;
+}
+
+
 void parse_args(VariantConfigs& args)
 {
     args["weights"] = FLAGS_weights;
-    args["model"] = FLAGS_cfg;
+    args["model"] = FLAGS_model;
     args["data"] = FLAGS_data;
     args["epochs"] = FLAGS_epochs;
     args["batch"] = FLAGS_batch_size;
@@ -98,12 +206,14 @@ int main(int argc, char* argv[])
     ::google::InitGoogleLogging(argv[0]);
     FLAGS_alsologtostderr = true;
 
+    // init_cublas(); 测试cublas是否正常调用
+
     std::string root_path = get_root_path_string();
     std::string default_yaml_file = std::filesystem::path(root_path).append("cfgs").append("default.yaml").string();
     VariantConfigs args_default = load_cfg_yaml(default_yaml_file);
 
 
-    auto set_model = [&](){
+    auto set_mode = [&]() -> std::string {
         std::vector<std::string> runtype = {"train", "val", "predict"};
         if(check_str_in_strs(runtype, FLAGS_runtype))
             args_default["mode"] = FLAGS_runtype;
@@ -111,31 +221,10 @@ int main(int argc, char* argv[])
             LOG(WARNING) << FLAGS_runtype << " not support. will set default: train";
             args_default["mode"] = "train";
         }
+        return std::get<std::string>(args_default["mode"]);
     };
     
-    auto get_task = [&](){
-        auto [name_ok, version, scale, task] = parse_yolo_config(std::filesystem::path(FLAGS_cfg).filename().string());
-        if(name_ok)
-        {
-            if(version != 5 && version != 11 && version != 12 && version !=13)
-            {
-                LOG(ERROR) << "only complete support v5, v11, v12.";
-                exit(-1);
-            }
 
-            if(task == "")
-                task = "detect";
-            if(scale == "")
-                scale = "n";
-        }
-        else{
-            LOG(ERROR) << FLAGS_cfg << " not right, or we can't support you input file.";
-            exit(-1);
-        }
-
-        args_default["task"] = task;
-        args_default["cfg_scale"] = scale;               
-    };
 
     auto check_pretrained = [&](){
         bool fileexists = std::filesystem::exists(std::filesystem::path(root_path).append(FLAGS_weights));
@@ -144,19 +233,26 @@ int main(int argc, char* argv[])
     };
 
     parse_args(args_default);
+    std::string task_s, scale_id;
+    // 根据设置，得到本次运行的任务目标: model, task, 用来生成对应的Trainer类
+    std::string mode = set_mode();
 
-    // 特殊处理
-    set_model();
-    get_task();
-
-    BaseTrainer newtrain(root_path, args_default);
-    if(FLAGS_runtype=="train")
+    if(false == get_task_from_filename(root_path, FLAGS_model, task_s, scale_id))
     {
-        newtrain.do_train();
-        // torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0)
-        //     : torch::Device(torch::kCPU); //select_device(opt["device"], opt["batch_size"]);
+        LOG(ERROR) << "get the task from: " << FLAGS_model << " fail.";
+        exit(-1);
+    }
 
-        // train(root_path, args_default, device, FLAGS_jit_weights);
+    std::cout << "mode: " << mode << " task: " << task_s << " scale: " << scale_id << std::endl;
+    std::shared_ptr<BaseTrainer> newtrain;
+    if (mode == "train")
+    {
+        if (task_s == "detect")
+        {
+            newtrain = std::make_shared<DetectionTrainer>(root_path, args_default);
+        }
+        newtrain->setup_trainer();
+        newtrain->do_train();
     }
     else if(FLAGS_runtype=="predict" || FLAGS_runtype == "jit")
     {
@@ -184,7 +280,7 @@ int main(int argc, char* argv[])
         torch::Device device = torch::cuda::is_available() && FLAGS_device != "cpu" ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
 
         std::string jit_filename = std::filesystem::path(root_path).append(FLAGS_jit_weights).string();
-        std::string model_filename = std::filesystem::path(root_path).append(FLAGS_cfg).string();
+        std::string model_filename = std::filesystem::path(root_path).append(FLAGS_model).string();
         std::string weights_filename = std::filesystem::path(root_path).append(FLAGS_weights).string();
         torch::jit::script::Module jit_model;
 
@@ -203,7 +299,7 @@ int main(int argc, char* argv[])
         }
         jit_model.eval();
 
-        auto model = Model(model_filename, 80, FLAGS_img_size, FLAGS_img_size, 3, nullptr);
+        auto model = std::dynamic_pointer_cast<BaseModelImpl>(std::make_shared<ModelImpl>(model_filename, 3, nullptr));
         model->eval(); 
         if(FLAGS_runtype == "predict")
         {

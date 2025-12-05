@@ -1,7 +1,7 @@
 ﻿#include "loss.h"
 #include "general.h"
 #include "utils.h"
-
+#include "ops.h"
 //  c10::Dict<std::string, torch::IValue> hyp;
 #include <torch/torch.h>
 #include <torch/script.h>
@@ -9,13 +9,12 @@
 #include <filesystem>
 
 //--------------------------- start V8DetectionLoss --------------------------
-v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int tal_topk /*= 10*/)
+v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<BaseModelImpl> model, torch::Device _device, int tal_topk/* = 10*/)
 {
-    this->device = torch::Device(torch::kCUDA);
+    this->device = _device;
 
     bce = torch::nn::BCEWithLogitsLoss(
         torch::nn::BCEWithLogitsLossOptions().reduction(torch::kNone));
-    std::shared_ptr<DetectImpl> m = model->getLastModulePtr();
 
     hyp = model->p_args;
     // check
@@ -24,12 +23,18 @@ v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int t
         std::cout << ColorString("v8DetectionLossImpl", "R") << "get model::p_args is nullptr" << std::endl;
     }
 
-    this->stride = m->stride;
-    this->nc = m->nc;
-    this->no = m->nc + m->reg_max * 4;
-    this->reg_max = m->reg_max;
+    dfl_ratio = hyp->count("dlf") > 0 ? std::get<float>(hyp->at("dfl")) : 1.0f;
+    box_ratio = hyp->count("box") > 0 ? std::get<float>(hyp->at("box")) : 1.0f;
+    cls_ratio = hyp->count("cls") > 0 ? std::get<float>(hyp->at("cls")) : 1.0f;
 
-    this->use_dfl = m->reg_max > 1;
+    this->stride = model->get_stride();
+    this->nc = model->n_classes;
+    this->reg_max = model->get_regmax();
+
+    std::cout << "v8DetectionLossImpl stride " << this->stride << " nc: " << this->nc << " reg_max: " << reg_max << std::endl;
+
+    this->no = this->nc + this->reg_max * 4;
+    this->use_dfl = this->reg_max > 1;
     //topk = tal_topk, num_classes = self.nc, alpha = 0.5, beta = 6.0
     assigner = TaskAlignedAssigner(tal_topk, nc, 0.5f, 6.0f);
     bbox_loss = BboxLoss(reg_max);
@@ -182,7 +187,7 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     */
 
     auto scale_tensor = imgsz.index({torch::tensor({ 1, 0, 1, 0 })});
-    targets = targets.to(this->device);
+    //targets = targets.to(this->device, true);
     targets = preprocess(targets, batch_size, scale_tensor);    // [bs, -1, 6] ==> [bs, -1, 5]
     auto targets_split = targets.split({ 1, 4 }, 2);
     torch::Tensor gt_labels = targets_split[0];
@@ -216,7 +221,7 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     // 正负样本都参与了损失计算
     float target_scores_sum = std::max(target_scores.sum().item<float>(), 1.0f);
 
-    loss[1] = this->bce->forward(pred_scores, target_scores.to(dtype)).sum().item<float>() / target_scores_sum;
+    loss[1] = this->bce->forward(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum;
     //std::cout << "cls loss: " << loss[1] << std::endl;
     //std::cout << "5 -- bce over...\n";    
     // std::cout << "fg_mask: " << fg_mask.sizes() << " " << fg_mask.sum() << std::endl;    
@@ -238,18 +243,10 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
         loss[2] = tmp_ldfl;
     }
     //std::cout << "6 -- box loss over...\n";   
-    float _dfl_ratio = 1.0;
-    float _box_ratio = 1.0;
-    float _cls_ratio = 1.0;
-    if(hyp!=nullptr && hyp->size() != 0)
-    {
-        _dfl_ratio = std::get<float>(hyp->at("dfl"));
-        _box_ratio = std::get<float>(hyp->at("box"));
-        _cls_ratio = std::get<float>(hyp->at("cls"));
-    }    
-    loss[0] = loss[0].item().toFloat() * _box_ratio;
-    loss[1] = loss[1].item().toFloat() * _cls_ratio;
-    loss[2] = loss[2].item().toFloat() * _dfl_ratio;
+  
+    loss[0] = loss[0] * box_ratio;
+    loss[1] = loss[1] * cls_ratio;
+    loss[2] = loss[2] * dfl_ratio;
     return { loss.sum() * batch_size, loss.detach() };
 }
 //--------------------------- end V8DetectionLoss --------------------------

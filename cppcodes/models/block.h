@@ -97,16 +97,12 @@ TORCH_MODULE(Proto);
 class SPPImpl : public BaseModule
 {
 public:
-    SPPImpl() {};
     SPPImpl(int in_channels, int number, std::vector<arg_complex>& args);
-    void  set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x) ;
 
 protected:
-    int _out_channel;
-
     void Init_Modules(int c1, int c2, std::vector<int> k = { 5, 9, 13 });
 
 public:
@@ -122,19 +118,18 @@ TORCH_MODULE(SPP);
 class SPPFImpl : public BaseModule
 {
 public:
-    SPPFImpl(){};
+    using Conf_Params = std::tuple<int, int>;
+    Conf_Params get_defaults() {
+        return std::make_tuple(0, 5);
+    }
+
     SPPFImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     // def __init__(self, c1: int, c2: int, k: int = 5):
     void Init_Modules(int c1, int c2, int k = 5);
-
-    void  set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;  
+    // int get_outchannels()  ;  
 
     torch::Tensor forward(torch::Tensor x) ; 
-
-protected:
-    int _out_channel;
 
 public:
     Conv cv1{ nullptr };
@@ -161,21 +156,22 @@ TORCH_MODULE(SPPF);
 class C2fImpl : public BaseModule
 {
 public:
-    C2fImpl() {};
+    using Conf_Params = std::tuple<int, bool, int, float>;
+    Conf_Params get_defaults() {
+        return std::make_tuple(0, false, 1, 0.5f);
+    }
+
     C2fImpl(int in_channels, int number, std::vector<arg_complex>& args);
     //    def __init__(self, c1: int, c2 : int, n : int = 1, shortcut : bool = False, g : int = 1, e : float = 0.5) :
     explicit C2fImpl(int c1, int c2, int n = 1, bool shortcut = false, int g = 1,  float e = 0.5);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x);
     torch::Tensor forward_split(torch::Tensor x);
 
 protected:
-    int _out_channel;
     int _c;
-    void Init_Modules(int c1, int c2, int n = 1, bool shortcut = false, int g = 1, float e = 0.5);
 
 public:
     Conv cv1{ nullptr };
@@ -206,22 +202,23 @@ TORCH_MODULE(C2f);
 class C3k2Impl : public BaseModule
 {
 public:
-    C3k2Impl() {};
+    using Conf_Params = std::tuple<int, bool, float, int, bool>;
+    Conf_Params get_defaults() {
+        return std::make_tuple(0, false, 0.5f, 1, true);
+    }
 
     C3k2Impl(int in_channels, int number, std::vector<arg_complex>& args);
     //  self, c1: int, c2: int, n: int = 1, c3k: bool = False, e: float = 0.5, g: int = 1, shortcut: bool = True
     explicit C3k2Impl(int c1, int c2, int n = 1, bool c3k = false, float e = 0.5f, int g = 1, bool shortcut = true);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x);
     torch::Tensor forward_split(torch::Tensor x);
-protected:
-    int _out_channel;
+public:
     bool _b_c3k;
     int _c;
-    void Init_Modules(int c1, int c2, int n = 1, bool c3k = false, float e = 0.5f, int g = 1, bool shortcut = true);
+protected:
+    void Init(int c1, int c2, int n = 1, bool c3k = false, float e = 0.5f, int g = 1, bool shortcut = true);
 
 public:
     Conv cv1{ nullptr };
@@ -256,21 +253,19 @@ TORCH_MODULE(C3k);
 class C3Impl : public BaseModule
 {
 public:
-    C3Impl() {};
+    using Conf_Params = std::tuple<int, bool, int, float>;
+    Conf_Params get_defaults(){
+        return std::make_tuple(0, true, 1, 0.5f);
+    }
 
     C3Impl(int in_channels, int number, std::vector<arg_complex>& args);
 
     // def __init__(self, c1, c2, n = 1, shortcut = True, g = 1, e = 0.5) : # ch_in, ch_out, number, shortcut, groups, expansion
     explicit C3Impl(int c1, int c2, int n=1, bool shortcut=true, int g = 1, float e=0.5f);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x);
-
-protected:
-    int _out_channel;
-    void Init_Modules(int c1, int c2, int n=1, bool shortcut=true, int g = 1, float e=0.5f);
 
 public:
     Conv cv1{ nullptr };
@@ -428,7 +423,11 @@ TORCH_MODULE(ABlock);
 class A2C2fImpl : public BaseModule
 {
 public:
-    A2C2fImpl() {};
+    using Conf_Params = std::tuple<int, bool, int, bool, float, float, int, bool>;
+    Conf_Params get_defaults() {
+        return std::make_tuple(0, true, 1, false, 2.0f, 0.5f, 1, true);
+    }
+
     A2C2fImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     // [-1, 4, A2C2f, [512, True, 4/1/-1]] ==> c2 = 512,  n = 4,  a2 = True, area = 4/1/-1
@@ -437,11 +436,10 @@ public:
         float e = 0.5, int g = 1, bool shortcut = true);
 
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x)  ;
 private:
-    int _out_channel;
     bool _a2;
     
     void Init_Modules(int c1, int c2, int n=1, bool a2 = true, 
@@ -547,11 +545,10 @@ public:
     explicit C2PSAImpl(int c1, int c2, int n = 1, float e = 0.5);
 
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x)  ;
 private:
-    int _out_channel;
     int _c;
 
     void Init_Modules(int c1, int c2, int n = 1, float e = 0.5);
@@ -857,25 +854,24 @@ TORCH_MODULE(C3AH);
 class HyperACEImpl : public BaseModule
 {
 public:
-    HyperACEImpl() {};
+    using Conf_Params = std::tuple<int, int, bool, bool, float, float, std::string>;
+    Conf_Params get_defaults()
+    {
+        return std::make_tuple(0, 8, true, false, 0.5f, 1.0f, "both");
+    }
     HyperACEImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     //def __init__(self, c1, c2, n=1, num_hyperedges=8, dsc3k=True, shortcut=False, e1=0.5, e2=1, context="both", channel_adjust=True):
     explicit HyperACEImpl(int c1, int c2, int n = 1, int num_hyperedges = 8, bool dsc3k = true, bool shortcut = false,
         float e1 = 0.5f, float e2 = 1.0f, std::string context = "both", bool channel_adjust = true);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(std::vector<torch::Tensor> x) ;
 
 private:
-    int _out_channel;
     int _b_dsc3k;
-
-    void Init_Modules(int c1, int c2, int n = 1, int num_hyperedges = 8, 
-        bool dsc3k = true,
-        bool shortcut = false,
+    void Init(int c1, int c2, int n = 1, int num_hyperedges = 8, bool dsc3k = true, bool shortcut = false,
         float e1 = 0.5f, float e2 = 1.0f, std::string context = "both", bool channel_adjust = true);
 public:
     Conv cv1{ nullptr };
@@ -892,22 +888,18 @@ TORCH_MODULE(HyperACE);
 class DownsampleConvImpl : public BaseModule
 {
 public:
-    DownsampleConvImpl() {};
     DownsampleConvImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     // def __init__(self, in_channels, channel_adjust=True):
     explicit DownsampleConvImpl(int in_channels, bool channel_adjust = true);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(torch::Tensor x) ;
 
 private:
-    int _out_channel;
     bool _b_channel_adjust;
-
-    void Init_Modules(int in_channels, bool _channel_adjust = true);
+    void Init(int in_channels, bool channel_adjust = true);
 
 public:
     torch::nn::AvgPool2d downsample{ nullptr };
@@ -918,18 +910,15 @@ TORCH_MODULE(DownsampleConv);
 class FullPAD_TunnelImpl : public BaseModule
 {
 public:
-    FullPAD_TunnelImpl() {};
     FullPAD_TunnelImpl(int in_channels, int number, std::vector<arg_complex>& args);
     // def __init__(self, in_channels):
     explicit FullPAD_TunnelImpl(int in_channels);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels()  ;
+    // int get_outchannels()  ;
 
     torch::Tensor forward(std::vector<torch::Tensor> x);
 private:
-    int _out_channel;
-    void Init_Modules(int in_channels);
+    void Init(int in_channels);
 
 public:
     torch::Tensor gate;
@@ -976,26 +965,31 @@ TORCH_MODULE(FullPAD_Tunnel);
 class DSC3k2Impl : public BaseModule
 {
 public:
-    DSC3k2Impl() {};
+    using Conf_Params = std::tuple<int, bool, float, int , bool, int, int , int>;
+    Conf_Params get_defaults()
+    {
+        return std::make_tuple(0, false, 0.5f, 1, true, 3, 7, 1);
+    }
     DSC3k2Impl(int in_channels, int number, std::vector<arg_complex>& args);
-    
 //      def __init__(self, c1, c2, n = 1, dsc3k = False, 
 //          e = 0.5, g = 1, shortcut = True, k1 = 3, k2 = 7,  d2 = 1 ):
     explicit DSC3k2Impl(int c1, int c2, int n = 1, bool dsc3k = false, float e = 0.5,
         int g = 1, bool shortcut = true, int k1 = 3, int k2 = 7, int d2 = 1);
 
-    void set_params(int in_channels, int number, std::vector<arg_complex>& args);
     torch::Tensor forward(std::vector<torch::Tensor> x) {
         LOG(ERROR) << "DSC3k2Impl forward not support vector input";
         return x[0];
     }
     torch::Tensor forward(torch::Tensor x);
-    int get_outchannels()  ;
+
+    // int get_outchannels() {return _out_channels;}
 private:
-    int _out_channel;
     bool _b_dsc3k;
-    void Init_Modules(int c1, int c2, int n = 1, bool dsc3k = false, float e = 0.5,
+    Conf_Params def_params = get_defaults();
+
+    void Init(int c1, int c2, int n = 1, bool dsc3k = false, float e = 0.5,
         int g = 1, bool shortcut = true, int k1 = 3, int k2 = 7, int d2 = 1);
+
 public:
 
     Conv cv1{ nullptr };

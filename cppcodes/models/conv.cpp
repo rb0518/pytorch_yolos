@@ -5,7 +5,11 @@
 #include <cmath>
 #include <algorithm> // 包含 std::gcd
 
+#include <typeinfo>
+#include <utility>
+
 #include "common.h"
+#include <experimental/optional>
 
 int autopad(int k, std::optional<int> p /*= std::nullopt*/, int d /*= 1*/)
 {
@@ -38,11 +42,9 @@ torch::nn::AnyModule createActivation(std::string act_type = "SiLU")
         act = std::make_shared<torch::nn::ReLUImpl>();
     else if(act_type == "True")
         act = std::make_shared<torch::nn::SiLUImpl>();
-//        act = std::make_shared<InplaceSiLUImpl>();
     else
     {
         act = std::make_shared<torch::nn::SiLUImpl>();
-//        act = std::make_shared<InplaceSiLUImpl>();
         LOG(ERROR)  << "Init not define activation type: " << act_type;       
     }
 
@@ -63,32 +65,21 @@ ConvImpl::ConvImpl(int c1, int c2, int k, int s, std::optional<int> p, int g , i
 
 void ConvImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args) 
 {
-    int argsize = args.size();
-    if (argsize == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]));
-    else if (argsize == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]));
-    else if (argsize == 3)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]));
-    else if (argsize == 4)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]),
-                std::get<int>(args[3]));
-    else if (argsize == 5)  // 2025-11-1 v13
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]),
-                std::get<int>(args[2]), std::get<int>(args[3]), std::get<int>(args[4]));
-    else
-        std::cout << "ConvImpl args number error. \n";
-}
+    Conf_Params defs = get_defaults();
+    make_param_from_args<Conf_Params>(defs, args);
 
-int ConvImpl::get_outchannels()
-{
-    return _out_channel;
+    if(args.size() < 4) // 保持 p = nullopt
+        Init_Modules(in_channels, std::get<0>(defs), std::get<1>(defs), std::get<2>(defs));
+    else
+        Init_Modules(in_channels, std::get<0>(defs), std::get<1>(defs), std::get<2>(defs), 
+            std::get<3>(defs),
+            std::get<4>(defs), std::get<5>(defs), std::get<6>(defs));
 }
 
 void ConvImpl::Init_Modules(int c1, int c2, int k, int s, std::optional<int> p, int g, int d, std::string act)
 {
     _in_channel = c1;
-    _out_channel = c2;
+    _out_channels = c2;
     _kernel_size = k;
     _stride = s;
     _padding = autopad(k, p, 1);
@@ -99,7 +90,6 @@ void ConvImpl::Init_Modules(int c1, int c2, int k, int s, std::optional<int> p, 
     conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, k).stride(s).padding(*_padding).bias(false).groups(g).dilation(d));
     bn = torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(c2));
     active_fn = createActivation(act);
-    
     register_module("conv", conv);
     register_module("bn", bn);
     register_module("act", active_fn.ptr());
@@ -115,13 +105,13 @@ void ConvImpl::fuse_conv_and_bn(bool fused_ /*= true*/)
     {
         fused = fused_;
         this->fusedconv = torch::nn::Conv2d(
-            torch::nn::Conv2dOptions(_in_channel, _out_channel, _kernel_size).stride(_stride).
+            torch::nn::Conv2dOptions(_in_channel, _out_channels, _kernel_size).stride(_stride).
             padding(*_padding).bias(true).groups(_groups).dilation(_dilation));
         fusedconv->to(conv->parameters().begin()->device());
         for (auto& param : fusedconv->named_parameters())
             param->set_requires_grad(false);
 
-        auto w_conv = conv->weight.clone().view({ _out_channel, -1 });
+        auto w_conv = conv->weight.clone().view({ _out_channels, -1 });
         auto w_bn = torch::diag(bn->weight.div(torch::sqrt(1e-5 + bn->running_var)));
         fusedconv->weight.copy_(torch::mm(w_bn, w_conv).view({ fusedconv->weight.sizes() }));
 
@@ -157,30 +147,19 @@ torch::Tensor ConvImpl::forward(torch::Tensor x)
 // ================================= start Conv2 ==================================
 
 Conv2Impl::Conv2Impl(int c1, int c2, int k, int s, std::optional<int> p, int g, int d, std::string act)
+    : ConvImpl(c1, c2, k, s, p, g, d, act)
 {
-    //Conv2Impl(c1, c2, k, s, p, g, d, act);
-    Init_Modules(c1, c2, k, s, p, g, d, act);
+    int k_cv2 = 1;
+    auto padding_cv2 = autopad(k_cv2, p, d);
+    cv2 = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, 1).stride(s).padding(padding_cv2).bias(false).groups(g).dilation(d));
+    
+    register_module("cv2", cv2);
 }
-
-void Conv2Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args) 
-{
-    int argsize = args.size();
-    if (argsize == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]));
-    else if (argsize == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]));
-    else if (argsize == 3)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]));
-    else if (argsize == 4)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]), std::get<int>(args[2]), std::get<int>(args[3]));
-    else
-        std::cout << "Conv2Impl args number error. \n";
-}
-
+/*
 void Conv2Impl::Init_Modules(int c1, int c2, int k, int s, std::optional<int> p, int g, int d,  std::string act)
 {
     _in_channel = c1;
-    _out_channel = c2;
+    _out_channels = c2;
     _kernel_size = k;
     _stride = s;
     _padding = autopad(k, p, d);
@@ -199,81 +178,23 @@ void Conv2Impl::Init_Modules(int c1, int c2, int k, int s, std::optional<int> p,
     int k_cv2 = 1;
     auto padding_cv2 = autopad(k_cv2, p, d);
     cv2 = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, 1).stride(s).padding(padding_cv2).bias(false).groups(g).dilation(d));
+    
     register_module("cv2", cv2);
 }
-
+*/
 torch::Tensor Conv2Impl::forward(torch::Tensor x)
 {
-    torch::Tensor r_conv;
-    torch::Tensor r_cv2;
-    torch::Tensor r_bn;
-    torch::Tensor ret;
-
     if(fused)
         return active_fn.forward(bn->forward(conv->forward(x)));
 
-    r_conv = conv->forward(x);
-    r_cv2 = cv2->forward(x);
-    torch::Tensor r_add = r_conv + r_cv2;
-    r_bn = bn->forward(r_add);
-    ret = active_fn.forward(r_bn);
-    return ret;
-
-    //return active_fn.forward(bn->forward(conv->forward(x) + cv2->forward(x)));   
+    return active_fn.forward(bn->forward(conv->forward(x) + cv2->forward(x)));   
 }
 // ------------------ End Conv2 -----------------------------
 
 // ------------------ start DWConv -----------------------------
 DWConvImpl::DWConvImpl(int c1, int c2, int k, int s, int d, std::string act)
-{
-    Init_Modules(c1, c2, k, s, d, act);
-}
-
-void DWConvImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int args_size = args.size();
-    if (args_size == 5)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]),
-            std::get<int>(args[2]), std::get<int>(args[3]), std::get<std::string>(args[4]));
-    else
-        LOG(ERROR) << "DWConv number of args must be 5: " << args_size;
-}
-
-torch::Tensor DWConvImpl::forward(torch::Tensor x)
-{
-    std::vector<torch::Tensor> rets(3);
-
-    rets[0] = conv->forward(x);
-    rets[1] = bn->forward(rets[0]);
-    rets[2] = active_fn.forward(rets[1]);
-
-    //return active_fn.forward(bn->forward(conv->forward(x)));
-    return rets[2];
-}
-
-void DWConvImpl::Init_Modules(int c1, int c2, int k /*= 1*/, int s /*= 1*/, int d /*= 1*/, std::string act/* = "True"*/)
-{
-    _in_channel = c1;
-    _out_channel = c2;
-    _kernel_size = k;
-    _stride = s;
-    _dilation = d;
-    _padding = autopad(k, _padding, d);
-    int gcd_g = std::gcd(c1, c2);
-    conv = torch::nn::Conv2d(torch::nn::Conv2dOptions(c1, c2, k)
-            .stride(s)
-            .padding(*_padding)
-            .bias(false)
-            .groups(gcd_g)
-            .dilation(d));
-
-    bn = torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(c2));
-
-    active_fn = createActivation(act);
-
-    register_module("conv", conv);
-    register_module("bn", bn);
-    register_module("act", active_fn.ptr());
+    : ConvImpl(c1, c2, k, s, std::nullopt, std::gcd(c1, c2), d, act)
+{    
 }
 // ------------------ End DWConv -----------------------------
 
@@ -319,15 +240,10 @@ void FocusImpl::set_params(int in_channels, int number, std::vector<arg_complex>
 
 }
 
-int FocusImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 void FocusImpl::Init_Modules(int c1, int c2, int k/* = 1*/, int s/* = 1*/,
     std::optional<int> p/* = std::nullopt*/, int g /*= 1*/, std::string act /*= "True"*/)
 {
-    _out_channel = c2;
+    _out_channels = c2;
 
     conv = Conv(c1 * 4, c2, k, s, p, g, 1, act);
     register_module("conv", conv);
@@ -359,6 +275,7 @@ torch::Tensor FocusImpl::forward(torch::Tensor x)
 
 ConcatImpl::ConcatImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
+    _out_channels = 0;
     set_params(in_channels, number, args);
 }
 
@@ -367,10 +284,10 @@ void ConcatImpl::set_params(int in_channels, int number, std::vector<arg_complex
     _dimen = std::get<int>(args[0]);
 }
 
-int ConcatImpl::get_outchannels()
-{
-    return 0;   // 该类返回是输入拼接后的维度，设定返回0，由外部程序计算
-}
+// int ConcatImpl::get_outchannels()
+// {
+//     return 0;   // 该类返回是输入拼接后的维度，设定返回0，由外部程序计算
+// }
 
 torch::Tensor ConcatImpl::forward(std::vector<torch::Tensor> x)
 {
@@ -395,11 +312,6 @@ void GhostConvImpl::set_params(int in_channels, int number, std::vector<arg_comp
         std::cout << "GhostConvImpl args number error. \n";
 }
 
-int GhostConvImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 GhostConvImpl::GhostConvImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     set_params(in_channels, number, args);
@@ -418,7 +330,7 @@ torch::Tensor GhostConvImpl::forward(torch::Tensor x)
 
 void GhostConvImpl::Init_Modules(int c1, int c2, int k, int s, int g, std::string act)
 {
-    _out_channel = c2;
+    _out_channels = c2;
 
     int c_ = c2 / 2; // static_cast<int>(std::trunc(float(c2) / 2.0));
 
@@ -442,11 +354,6 @@ void ConvTransposeImpl::set_params(int in_channels, int number, std::vector<arg_
     }
 }
 
-int ConvTransposeImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 ConvTransposeImpl::ConvTransposeImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     set_params(in_channels, number, args);
@@ -459,7 +366,7 @@ ConvTransposeImpl::ConvTransposeImpl(int c1, int c2, int k, int s, int p, bool b
 
 void ConvTransposeImpl::Init_Modules(int c1, int c2, int k , int s, int p0, bool bn, std::string act)
 {
-    _out_channel = c2;
+    _out_channels = c2;
 
     conv_transpose = torch::nn::ConvTranspose2d(torch::nn::ConvTranspose2dOptions(c1, c2, k)
         .stride(s).padding(p0).bias(!bn));
@@ -509,11 +416,6 @@ void DSConvImpl::set_params(int in_channels, int number, std::vector<arg_complex
     }
 }
 
-int DSConvImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 torch::Tensor DSConvImpl::forward(torch::Tensor x)
 {
     return act->forward(bn->forward(pw->forward(dw->forward(x))));
@@ -522,7 +424,7 @@ torch::Tensor DSConvImpl::forward(torch::Tensor x)
 void DSConvImpl::Init_Modules(int c_in, int c_out, int k, int s, 
     std::optional<int> p , int d, bool bias)
 {
-    _out_channel = c_out;
+    _out_channels = c_out;
 
     if (p == std::nullopt)
         p = autopad(k, p, d);

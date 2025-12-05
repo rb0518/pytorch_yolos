@@ -1,6 +1,5 @@
 ﻿#include "yaml_load.h"
 
-#include <charconv>
 #include <ostream>
 #include <tuple>
 #include <vector>

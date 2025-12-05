@@ -152,7 +152,7 @@ std::tuple<Dataloader_Custom, int> create_dataloader(
 inline void check_batchsize(VariantConfigs& args)
 {
 	int batchsize = std::get<int>(args["batch"]);
-	if (batchsize <= 0 || batchsize > 32)
+	if (batchsize <= 0 || batchsize > 128)
 		args["batch"] = 16;
 }
 

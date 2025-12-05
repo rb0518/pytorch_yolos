@@ -1,6 +1,9 @@
 ﻿#pragma once
 #include <string>
-#include "yaml_load.h"
+#include <torch/torch.h>
+
+#include "globaldef.h"
+
 // 取得根目录路径
 std::string get_root_path_string();
 // 从cfgs目录中读取默认环境配置

@@ -1,5 +1,7 @@
-﻿#include "utils.h"
-#include "torch_utils.h"
+﻿#include "torch_utils.h"
+
+#include "globaldef.h"
+#include "utils.h"
 
 torch::Device get_device(const std::string& dev_set)
 {
@@ -60,9 +62,8 @@ torch::Device get_device(const std::string& dev_set)
 }
 
 
-std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<ModelImpl> ptr_model, VariantConfigs& args)
+std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<BaseModelImpl> model, VariantConfigs& args)
 {
-    auto model = ptr_model.get();
     const int nbs = 64;
     int batch_size = std::get<int>(args["batch"]);
     int accumulate = std::max(static_cast<int>(std::round(nbs / batch_size)), 1);
@@ -80,13 +81,13 @@ std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer
         {
             //std::cout << pair.key() <<": " << module.key() << " " << module.value()->name() << std::endl;
             if (pair.key().find(".bias") != std::string::npos) // no decay
-                pg2.push_back(pair.value());
+                pg2.emplace_back(pair.value());
             else if (pair.key().find(".weight") != std::string::npos) {
                 //if (auto* bn_module = module.value()->as<torch::nn::BatchNorm2d>())
                 if (pair.key().find("bn.weight") != std::string::npos)
-                    pg1.push_back(pair.value());  // no decay
+                    pg1.emplace_back(pair.value());  // no decay
                 else
-                    pg0.push_back(pair.value());  // with decay
+                    pg0.emplace_back(pair.value());  // with decay
             }
         }
     }
@@ -177,7 +178,7 @@ void save_checkpoint(std::string filename, torch::nn::Module* model,
     ckpt_out.write("epoch", torch::tensor(epoch));
     ckpt_out.save_to(filename);
 }
-
+#if 0
 ModelEMA::ModelEMA(std::shared_ptr<Model> ptr_model, float decay, int updates)
 {
     decay_ = decay;
@@ -224,7 +225,7 @@ void ModelEMA::update(torch::nn::Module& model)
         }
     }
 }
-
+#endif
 
 void module_sub_info(torch::nn::Module& sub_module, const std::string key, int sub_step) 
 {

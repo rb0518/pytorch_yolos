@@ -97,6 +97,26 @@ if(WIN32)
     target_link_libraries(yolos opengl32)
 endif()
 
+# 2025-12-04 wsl下运行v13版本时报错如下：
+# terminate called after throwing an instance of 'c10::Error'
+#    what():  CUDA error: CUBLAS_STATUS_NOT_INITIALIZED when calling `cublasSgemm( handle, opa, opb, m, n, k, &alpha, a, lda, b, ldb, &beta, c, ldc)`
+# 通过调用cmake .. 查看输出，连接时只添加cuda，应该是opencv编译时选中cublas, 所以没有自动有添加cublas相关的库，手动添加
+## 启用CUDA语言支持
+# enable_language(CUDA)
+## 自动查找CUDA工具包
+#find_package(CUDAToolkit REQUIRED)
+## 设置CUDA架构（根据实际GPU调整）
+#set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
+
+## 链接CUDA库
+#target_link_libraries(yolos 
+#    cudart
+#    cublas
+#    cublasLt
+#    curand
+#)
+
+
 # 解决libtorch在Windows下用VS2022编译问题，2.4+cuda12.6下没有问题，不需要进行处理
 if (WIN32)
     target_compile_options(yolos PRIVATE /D_USE_MATH_DEFINES)  # 解决Windows数学常量问题
@@ -111,5 +131,5 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/external/)
 if(WIN32)
     target_link_libraries(yolos ${OpenCV_LIBS} ${TORCH_LIBRARIES} ${GFLAGS_LIBRARIES} ${GLOG_LIBRARIES} yaml-cpp)
 elseif(UNIX)
-    target_link_libraries(yolos ${OpenCV_LIBS} ${TORCH_LIBRARIES}  gflags glog yaml-cpp)
+    target_link_libraries(yolos ${OpenCV_LIBS} ${TORCH_LIBRARIES} cudart cublas cublasLt curand gflags glog yaml-cpp)
 endif()

@@ -1,7 +1,7 @@
 ﻿#include "test.h"
 
 #include <filesystem>
-
+#include <map>
 #include "yaml-cpp/yaml.h"
 
 #include "datasets.h"
@@ -11,7 +11,8 @@
 #include "plots.h"
 
 #include "metrics.h"
-
+#include "nms.h"
+#include "ops.h"
 #include <regex>
 //    std::regex pattern("yolov5([nsmlx])?.yaml");  return std::resgex_search(filename, pattern);
 bool contains(const std::string& source, const std::string& to_find) {
@@ -51,7 +52,7 @@ torch::Tensor scale_coords(std::vector<float> img1_shape, torch::Tensor coords, 
 
 
 Dataloader_Custom test(
-    std::shared_ptr<ModelImpl> model,   // model or nullpytr
+    std::shared_ptr<BaseModelImpl> model,   // model or nullpytr
     std::string root_,          
     VariantConfigs args,             // default.yaml 
     std::vector<std::string> cls_names,
@@ -70,17 +71,13 @@ Dataloader_Custom test(
 {
     bool is_training = model != nullptr ? true : false;
     auto device = torch::cuda::is_available() ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
-    ModelImpl* model_ptr;
-    std::shared_ptr<ModelImpl> model_tmp; 
+    BaseModelImpl* model_ptr;
+    std::shared_ptr<BaseModelImpl> model_tmp; 
     std::string save_dir = save_dir_;
     if(is_training)
     {
         model_ptr = model.get();
-        device = model_ptr->parameters().begin()->device();
-
-        //if (device.type() == torch::kCPU)
-        //    std::cout << "device == torch::kCPU " << std::endl;
-        //std::cout << "device == torch::kCUDA" << std::endl;
+        device = model->parameters().begin()->device();
     }
     else
     {   //不是从train.cpp中调用，需要读取环境变量，初始化Model，并加载weights
@@ -106,7 +103,7 @@ Dataloader_Custom test(
             LOG(ERROR) << "weights file: " << weights << " not exist." ;
             return nullptr;
         }
-        model_tmp = std::make_shared<ModelImpl>(cfg_file, nc, imgsz, imgsz, 3, &args);
+        model_tmp = std::dynamic_pointer_cast<BaseModelImpl>(std::make_shared<ModelImpl>(cfg_file, 3, &args));
         model_ptr = model_tmp.get();
         torch::serialize::InputArchive ckpt_in;
         ckpt_in.load_from(weights_file); // model optim epoch
@@ -122,7 +119,7 @@ Dataloader_Custom test(
             return nullptr;
         }
     }
-    bool is_segment = model_ptr->is_segment;
+    bool is_segment = false; //model_ptr->is_segment;
     model_ptr->eval();
     if(false == is_training)
         std::cout << "Model create over..." << std::endl;
@@ -370,7 +367,7 @@ Dataloader_Custom test(
     return std::move(val_dataloader);
 }
 
-BaseValidator::BaseValidator(std::shared_ptr<Model> _model_ptr, VariantConfigs _args_input, std::string _root_dir)
+BaseValidator::BaseValidator(std::shared_ptr<BaseModelImpl> _model_ptr, VariantConfigs _args_input, std::string _root_dir)
     : model_ptr(_model_ptr), args(_args_input), root_dir(_root_dir)
 {
     is_training = model_ptr != nullptr; // 未传入trainer中的model，则说明是要直接重新生成个model来验证
@@ -467,7 +464,7 @@ void BaseValidator::load_weight()
     torch::serialize::InputArchive model_in;
     if (ckpt_in.try_read("model", model_in))
     {
-        model_ptr->ptr()->load(model_in);
+        model_ptr->load(model_in);
         std::cout << "load " << weights_file << " over..." << std::endl;
     }
     else
@@ -489,7 +486,7 @@ void BaseValidator::setup_model()
         imgsz = std::get<int>(args["imgsz"]);
         YAML::Node cfgs = YAML::LoadFile(cfg_file);
         nc = cfgs["nc"].as<int>();
-        model_ptr = std::make_shared<Model>(cfg_file, nc, imgsz, imgsz, 3, &args);
+        model_ptr = std::dynamic_pointer_cast<BaseModelImpl>(std::make_shared<ModelImpl>(cfg_file, 3, &args));
         if (model_ptr == nullptr)
         {
             LOG(ERROR) << "model init error.\n";
@@ -501,7 +498,7 @@ void BaseValidator::init_device()
 {
     if (is_training)
     {
-        device = model_ptr->get()->parameters().begin()->device();
+        device = model_ptr->parameters().begin()->device();
         return;
     }
 
@@ -526,7 +523,7 @@ YoloCustomExample BaseValidator::preprocess(YoloCustomExample& batch)
     {
         batch.at(item.key()) = item.value().to(this->device, non_blocking);
     }
-    batch.at("img") = batch.at("img").to(torch::kFloat) / 255.f;
+    batch.insert("img", batch.at("img").to(torch::kFloat) / 255.f);
 
     return batch;
 }
@@ -580,6 +577,10 @@ void BaseValidator::update_metrics(std::vector<torch::Dict<std::string, torch::T
 
         auto pbatch = this->_prepare_batch(si, batch);
         auto predn = this->_prepare_pred(preds[si]);
+
+        auto cls = pbatch.at("cls");
+        cls = cls.cpu();
+        bool no_pred = predn.at("cls").size(0) == 0;
     }
 }
 
@@ -604,7 +605,7 @@ void BaseValidator::do_validate()
         int num_targets = prepro_batch.at("bboxes").size(0);
 
         // 1 Inference
-        auto [pred_t, train_v, mask_t] = model_ptr->get()->forward(prepro_batch.at("img"));
+        auto [pred_t, train_v, mask_t] = model_ptr->forward(prepro_batch.at("img"));
 
         // 2 Loss 暂时未修改，后续要将v8DetectionLoss集成到model中，并添加loss函数
 
@@ -627,7 +628,7 @@ void BaseValidator::do_validate()
 
 void BaseValidator::_model_eval()
 {
-    this->model_ptr->get()->eval();
+    this->model_ptr->eval();
 }
 
 /*
@@ -654,6 +655,9 @@ torch::Dict<std::string, torch::Tensor> BaseValidator::_prepare_batch(int si,
         ratio_pad = batch["ratio_pad"][si]
         batch和target中坐标都是包括偏移的，暂时不考虑
     */
+    torch::Tensor t_imgsz = torch::tensor({this->imgsz, this->imgsz});
+    torch::Tensor ratio_pad = torch::tensor({ 1.0f, 1.0f, 0.f, 0.f }).reshape({ 2, 2 });
+    torch::Tensor ori_shape = torch::tensor({this->imgsz, this->imgsz});
 
     if (cls.size(0)) // 有标注
     {
@@ -662,9 +666,16 @@ torch::Dict<std::string, torch::Tensor> BaseValidator::_prepare_batch(int si,
             torch::TensorOptions().device(this->device));
         bbox = bbox * scale;
     }
+
+    std::map <std::string, 
+        std::variant <torch::Tensor, std::tuple<float, float>, std::vector<std::tuple<float, float>>>
+        > rets = {};
+
     torch::Dict<std::string, torch::Tensor> ret;
     ret.insert("cls", cls);
     ret.insert("bboxes", bbox);
+    ret.insert("imgsz", t_imgsz);
+    ret.insert("ratio_pad", ratio_pad);
     
     return ret;        
 }

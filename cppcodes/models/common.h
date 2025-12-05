@@ -14,7 +14,7 @@ public:
 
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
     torch::Tensor forward(torch::Tensor x) ;    
-    int get_outchannels()  {return out_ch;}
+    // int get_outchannels()  {return out_ch;}
 public:
     int in_ch;
     int out_ch;
@@ -40,7 +40,7 @@ public:
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
 
     torch::Tensor forward(torch::Tensor x) ;    
-    int get_outchannels()  {return out_ch;}
+    // int get_outchannels()  {return out_ch;}
 
     int in_ch;
     int out_ch;
@@ -56,7 +56,7 @@ public:
     
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
     torch::Tensor forward(torch::Tensor x) ;    
-    int get_outchannels()  {return out_ch;}
+    // int get_outchannels()  {return out_ch;}
 
     int in_ch;
     int out_ch;

@@ -10,69 +10,8 @@
 #include <tuple>
 #include <charconv>
 
-// 函数名定义说明： 函数名中带n，对应的是在图中的坐标
-//Convert bounding box coordinates from (x1, y1, x2, y2) format to (x, y, width, height) format where (x1, y1) is the
-//top-left corner and (x2, y2) is the bottom-right corner.
-//Args:
-//    x (np.ndarray | torch.Tensor): The input bounding box coordinates in (x1, y1, x2, y2) format.
-//Returns:
-//    y (np.ndarray | torch.Tensor): The bounding box coordinates in (x, y, width, height) format.
-torch::Tensor xyxy2xywh(const torch::Tensor& x);
-
-
-//Convert bounding box coordinates from (x, y, width, height) format to (x1, y1, x2, y2) format where (x1, y1) is the
-//top-left corner and (x2, y2) is the bottom-right corner. Note: ops per 2 channels faster than per channel.
-//Args:
-//    x (np.ndarray | torch.Tensor): The input bounding box coordinates in (x, y, width, height) format.
-//Returns:
-//    y (np.ndarray | torch.Tensor): The bounding box coordinates in (x1, y1, x2, y2) format.
-torch::Tensor xywh2xyxy(const torch::Tensor& x);
-
-
-//Convert normalized bounding box coordinates to pixel coordinates.
-//Args:
-//    x (np.ndarray | torch.Tensor): The bounding box coordinates.
-//    w (int): Width of the image. Defaults to 640
-//    h (int): Height of the image. Defaults to 640
-//    padw (int): Padding width. Defaults to 0
-//    padh (int): Padding height. Defaults to 0
-//Returns:
-//    y (np.ndarray | torch.Tensor): The coordinates of the bounding box in the format [x1, y1, x2, y2] where
-//        x1,y1 is the top-left corner, x2,y2 is the bottom-right corner of the bounding box.
-torch::Tensor xywhn2xyxy(const torch::Tensor& x, int w = 640, int h = 640, int padw = 0, int padh = 0);
-
-
-//Convert bounding box coordinates from (x1, y1, x2, y2) format to (x, y, width, height, normalized) format. x, y,
-//width and height are normalized to image dimensions.
-//Args:
-//    x (np.ndarray | torch.Tensor): The input bounding box coordinates in (x1, y1, x2, y2) format.
-//    w (int): The width of the image. Defaults to 640
-//    h (int): The height of the image. Defaults to 640
-//    clip (bool): If True, the boxes will be clipped to the image boundaries. Defaults to False
-//    eps (float): The minimum value of the box0x00s width and height. Defaults to 0.0
-//Returns:
-//    y (np.ndarray | torch.Tensor): The bounding box coordinates in (x, y, width, height, normalized) format
-torch::Tensor xyxyn2xywh(const torch::Tensor& x, int w = 640, int h = 640, bool clip = false, float eps = 0.0);
-
-torch::Tensor xyn2xy(const torch::Tensor& x, int w = 640, int h = 640, int padw = 0, int padh = 0);
-
 int searchfiles_in_folder(const std::string& folder, const std::string& exttype, 
         std::vector<std::string>& lists);
-
-// try convert str to float(int), if success bool == true else false
-std::tuple<float, bool> ConvertToNumber(const std::string& str);
-
-std::vector<torch::Tensor> non_max_suppression(
-    torch::Tensor prediction,
-    float conf_thres = 0.25,
-    float iou_thres = 0.45,
-    const std::vector<std::vector<int>>& classes = {},
-    bool agnostic = false,
-    bool multi_label = false,
-    const std::vector<std::vector<float>>& labels = {},
-    int max_det = 300,
-    int nm = 0  // number of masks
-);
 
 /*
     从一个 torch script 文件中调入相同的module的权重文件, 其中几个约定：
@@ -137,61 +76,16 @@ inline std::string ColorString(const std::string& info, const std::string& col =
 */
 std::tuple<bool, int, std::string, std::string> parse_yolo_config(const std::string& filename);
 
-namespace ops {
-    /*
-    """
-    Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
-
-    Args:
-        prediction (torch.Tensor): A tensor of shape (batch_size, num_classes + 4 + num_masks, num_boxes)
-            containing the predicted boxes, classes, and masks. The tensor should be in the format
-            output by a model, such as YOLO.
-        conf_thres (float): The confidence threshold below which boxes will be filtered out.
-            Valid values are between 0.0 and 1.0.
-        iou_thres (float): The IoU threshold below which boxes will be filtered out during NMS.
-            Valid values are between 0.0 and 1.0.
-        classes (List[int]): A list of class indices to consider. If None, all classes will be considered.
-        agnostic (bool): If True, the model is agnostic to the number of classes, and all
-            classes will be considered as one.
-        multi_label (bool): If True, each box may have multiple labels.
-        labels (List[List[Union[int, float, torch.Tensor]]]): A list of lists, where each inner
-            list contains the apriori labels for a given image. The list should be in the format
-            output by a dataloader, with each label being a tuple of (class_index, x1, y1, x2, y2).
-        max_det (int): The maximum number of boxes to keep after NMS.
-        nc (int, optional): The number of classes output by the model. Any indices after this will be considered masks.
-        max_time_img (float): The maximum time (seconds) for processing one image.
-        max_nms (int): The maximum number of boxes into torchvision.ops.nms().
-        max_wh (int): The maximum box width and height in pixels.
-        in_place (bool): If True, the input prediction tensor will be modified in place.
-        rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMS.
-
-    Returns:
-        (List[torch.Tensor]): A list of length batch_size, where each element is a tensor of
-            shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
-            (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
-    """
-    */
-    std::vector<torch::Tensor> non_max_suppression(
-        torch::Tensor prediction,
-        float conf_thres = 0.25f,
-        float iou_thres = 0.45f,
-        std::vector<int> classes = {},
-        bool agnostic = false,
-        bool multi_label = false,
-        std::vector<int> = {}, // 暂时未用，用std::vector<int>代替
-        int max_det = 300,
-        int nc = 0,
-        float max_time_img = 0.05f,
-        int max_nms = 30000,
-        int max_wh = 7680,
-        bool in_place = true,
-        bool rotated = false
-        );
-} //end namespace ops
-
 // 2025-10-30 读取pytorch export Tensor文件
 /*
     pytorch中torch.save调用pickle_save模式，libtorch中torch::save和
     torch::load是保持与torch::jit::load torch::jit::save一致
 */
 torch::Tensor load_tensordata_from_file(std::string filename);
+
+/*
+* 目标，将yaml文件读入到内存中，为后续转换为tensor，存入到pt文件，实现读取pt时重构对应的网络
+*/
+bool readFileToMemory(const std::string& filePath, std::vector<unsigned char>& buffer);
+torch::Tensor convertMemoryToTensor(std::vector<unsigned char>& buffer);
+void convertTensorToMemory(torch::Tensor x, std::vector<unsigned char>& buffer);

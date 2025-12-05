@@ -18,17 +18,48 @@
 #include "plots.h"
 #include "yaml_load.h"
 #include "torch_utils.h"
+#include "nms.h"
 
 #include "augmentations.h"
 
 #include "test.h"
 #ifdef WIN32
 
+typedef struct my_autocast {
+    void _enter(torch::DeviceType deviceType)
+    {
+        devicetype = deviceType;
+        pre_cache_enable = at::autocast::is_autocast_cache_enabled();
+        pre_enable = at::autocast::is_autocast_enabled(devicetype);
+        pre_fastdtype = at::autocast::get_autocast_dtype(devicetype);
+
+        torch::autocast::set_autocast_enabled(devicetype, true);
+        torch::autocast::set_autocast_dtype(devicetype, pre_fastdtype);
+        torch::autocast::increment_nesting();
+        torch::autocast::set_autocast_cache_enabled(pre_cache_enable);
+
+        
+    }
+    void _exit() { 
+        if (at::autocast::decrement_nesting() == 0)
+            at::autocast::clear_cache();
+        at::autocast::set_autocast_enabled(devicetype, pre_enable);
+        at::autocast::set_autocast_dtype(devicetype, pre_fastdtype);
+        at::autocast::set_autocast_cache_enabled(pre_cache_enable);
+        ; }
+
+    torch::DeviceType devicetype;
+    bool pre_enable;
+    bool pre_cache_enable;
+    c10::ScalarType pre_fastdtype;
+}MY_AUTOCAST;
+
+
 //void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../data/images/zidane.jpg");       // Working Directory = ${ProjectDir}
-void test_model(std::shared_ptr<ModelImpl> ptr_model, std::string strfilename = "../../data/images/bus.jpg");       // Working Directory = ${ProjectDir}
+void test_model(std::shared_ptr<BaseModelImpl> ptr_model, std::string strfilename = "../../data/images/bus.jpg");       // Working Directory = ${ProjectDir}
 #else
 //void test_model(std::shared_ptr<Model> ptr_model, std::string strfilename = "../../data/images/zidane.jpg");
-void test_model(std::shared_ptr<ModelImpl> ptr_model, std::string strfilename = "../../data/images/bus.jpg");
+void test_model(std::shared_ptr<BaseModelImpl> ptr_model, std::string strfilename = "../../data/images/bus.jpg");
 #endif
 std::tuple<std::string, std::string, std::string> create_dirs(const std::string save_dir)
 {
@@ -59,16 +90,16 @@ std::function<float(int)> create_lr_lambda(bool linear_lr, float lrf, int epochs
     }
 }
 
-void test_model(std::shared_ptr<ModelImpl> ptr_model, std::string strfilename /*= "../../data/images/bus.jpg"*/)
+void test_model(std::shared_ptr<BaseModelImpl> ptr_model, std::string strfilename /*= "../../data/images/bus.jpg"*/)
 {
-    auto model = ptr_model.get();
+    auto model = ptr_model;
     float confidence_threshold = 0.2f;
     float iou_threshold = 0.45f;
     int nms_max_bbox_size_ = 4096;  //只保留排前的多少个
 
     model->eval();
 
-    bool is_segment = model->is_segment;
+    bool is_segment = false;
     torch::Device device = model->parameters().begin()->device();
     cv::Mat src_image = cv::imread(strfilename);
 
@@ -218,26 +249,64 @@ void test_model(std::shared_ptr<ModelImpl> ptr_model, std::string strfilename /*
 BaseTrainer::BaseTrainer(std::string _root, VariantConfigs cfg_default)
     : root_dir(_root), args(cfg_default)
 {
+    get_args_settings();
+
+    check_resume();
     show_cfg_info("BaseTrainer cfg: ", args);
+
     init_device();
 
-    init_torch_seek(std::get<int>(args["seed"]));
+    init_torch_seek(std::get<int>(args["seed"]) + 1);
+
     task_name = std::get<std::string>(args["task"]);
     std::cout << ColorString("Task: ") << task_name << std::endl;
 
     init_dirs();
-    setup_model();
+    save_cfg_yaml(args, std::filesystem::path(save_dir).append("args.yaml").string());
+}
+void BaseTrainer::get_args_settings()
+{
+    plots_flags = args.count("plots") > 0 ? std::get<bool>(args["plots"]) : true;
+    model_file = std::filesystem::path(root_dir).append(std::get<std::string>(args["model"])).string();
+    b_resume = std::get<bool>(args["resume"]);
+}
 
-    load_pretrained();
+/*
+* 如果是启动resume训练，读取原来训练保存目录下的cfg配置文件
+* 由于C++代码没法让像python一样使用动态变量，所以必须由weight变量来
+* 传递具体的路径
+*/
+void BaseTrainer::check_resume()
+{
+    b_resume = (b_resume && std::filesystem::path(model_file).extension() == ".pt") ? true : false;
 
-    freeze_modules();
+    if (b_resume)  // 两样检测正确
+    {
+        std::string weight_file = std::get<std::string>(args["weights"]);
+        auto wf_parent = std::filesystem::path(model_file).parent_path();
+        auto last_opts_file = wf_parent.append("args.yaml");
+        if (std::filesystem::exists(last_opts_file)) {
+            // 读取上次配置，并替换当前args中相关设置
+            auto last_opts = load_cfg_yaml(last_opts_file.string());
 
-    init_dataloader();
-
-    setup_optimizer();
-    setup_scheduler();
-
-    resume_training();
+            args["data"] = std::get<std::string>(last_opts["data"]);
+            args["imgsz"] = std::get<int>(last_opts["imgsz"]);
+            args["batch"] = std::get<int>(last_opts["batch"]);
+            args["device"] = std::get<std::string>(last_opts["device"]);
+            args["close_mosaic"] = std::get<int>(last_opts["close_mosaic"]);
+            // 简化不做比对，直接使用上次的设置的model cfg配置
+            args["model"] = std::get<std::string>(last_opts["model"]);
+        }
+        else
+        {
+            LOG(ERROR) << "resume train, but not found the last time args.yaml file: " << last_opts_file.string();
+            args["resume"] = false;
+        }
+    }
+    else
+    {
+        LOG(ERROR) << "want resume train, must args.resume and model_file must be .pt file.";
+    }
 }
 
 void BaseTrainer::init_device()
@@ -317,29 +386,9 @@ void BaseTrainer::init_dirs()
 
 }
 
-void BaseTrainer::setup_model()
-{
-    auto tmp_cfg_file_path = std::filesystem::path(root_dir).append(std::get<std::string>(args["model"]));
-    std::string cfg_file = "";
-    if (std::filesystem::exists(tmp_cfg_file_path))
-        cfg_file = tmp_cfg_file_path.string();
-    else
-    {
-        LOG(ERROR) << "set model cfg yaml file: " << tmp_cfg_file_path.string() << "not exists.";
-        exit(-1);
-    }
-    auto imgsz = std::get<int>(args["imgsz"]);
-    model = Model(cfg_file, 80, imgsz, imgsz, 3, &args);
-    std::cout << "Model create in trainbase over.\n";
-    model->set_args_prt(&args); // 传递指针，适应全局变量需要
-    std::cout << "Model set args over.\n";
-
-    model->show_modelinfo(std::get<bool>(args["debug_show_info"]));
-    model->to(device);
-}
-
 void BaseTrainer::load_pretrained()
 {
+    this->resume_load_ok = false;
     bool load_from_jit = false;
     std::string jit_weights_file = std::get<std::string>(args["jit_weights"]);
     if (jit_weights_file != "")
@@ -353,11 +402,16 @@ void BaseTrainer::load_pretrained()
             LoadWeightFromJitScript(jit_weights_file, *model, true);
         }
     }
-
-    if (std::get<bool>(args["resume"]) && !load_cfg_yaml)
+    if (b_resume)
     {
-
+         std::cout << ColorString("Load pretrain weights: ", "Info") << model_file;
+        
+        torch::serialize::InputArchive ckpt_in;
+        ckpt_in.load_from(model_file);
+        model->load_weights(ckpt_in);
+        std::cout << " over." << std::endl;
     }
+
 }
 
 void BaseTrainer::freeze_modules()
@@ -377,14 +431,6 @@ void BaseTrainer::freeze_modules()
             p.value().requires_grad_(true);
         }
     }
-}
-
-void BaseTrainer::init_dataloader()
-{
-    if(task_name == "segment")
-        train_loader = new DataloaderBase(root_dir, args, 32, false, true);
-    else
-        train_loader = new DataloaderBase(root_dir, args, 32, false, false);
 }
 
 void BaseTrainer::setup_optimizer()
@@ -445,16 +491,22 @@ std::shared_ptr<torch::optim::Optimizer> BaseTrainer::build_optiomizer(int nc,st
     }
 
     std::vector<torch::Tensor> pg0, pg1, pg2;
-    for (auto& pair : model->named_parameters())
+    for (auto& module : model->named_modules(std::string(), false))
     {
-        if (pair.key().find(".bias") != std::string::npos) // no decay
-            pg2.push_back(pair.value());
-        else if (pair.key().find(".weight") != std::string::npos) 
+        for(auto& pair : module.value()->named_parameters(false))
         {
-            if (pair.key().find("bn.weight") != std::string::npos)
+            if (pair.key().find("bias") != std::string::npos) // no decay
+            {
+                pg2.push_back(pair.value());
+            }
+            else if (auto m = module.value()->as<torch::nn::BatchNorm2d>())
+            {
                 pg1.push_back(pair.value());  // no decay
+            }
             else
+            {
                 pg0.push_back(pair.value());  // with decay
+            }
         }
     }
 
@@ -470,7 +522,7 @@ std::shared_ptr<torch::optim::Optimizer> BaseTrainer::build_optiomizer(int nc,st
     std::vector<torch::optim::OptimizerParamGroup> paramgroups;
     if (name == "SGD")
     {
-        auto pg2_options = torch::optim::SGDOptions(lr).momentum(momentum).nesterov(true).weight_decay(0.0);
+        auto pg2_options = torch::optim::SGDOptions(lr).momentum(momentum).nesterov(true)/*.weight_decay(0.0)*/;
         paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg2,
             std::make_unique<torch::optim::SGDOptions>(pg2_options)));
 
@@ -478,7 +530,7 @@ std::shared_ptr<torch::optim::Optimizer> BaseTrainer::build_optiomizer(int nc,st
         paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg0,
             std::make_unique<torch::optim::SGDOptions>(pg0_options)));
 
-        auto pg1_options = torch::optim::SGDOptions(lr).weight_decay(0.0);
+        auto pg1_options = torch::optim::SGDOptions(lr)/*.weight_decay(0.0)*/;
         paramgroups.emplace_back(torch::optim::OptimizerParamGroup(pg1,
             std::make_unique<torch::optim::SGDOptions>(pg1_options)));
 
@@ -542,8 +594,10 @@ void BaseTrainer::setup_scheduler()
     bool is_linear = std::get<bool>(args["cos_lr"]) == false;
     float lrf = std::get<float>(args["lrf"]);
     int epochs = std::get<int>(args["epochs"]);
-    scheduler = std::make_shared<LambdaLR>(optimizer, 1.0f, lrf, epochs, is_linear);
 
+    CHECK(optimizer != nullptr) << "optimizer must be initialize before setup scheduler.";
+
+    scheduler = std::make_shared<LambdaLR>(optimizer, 1.0f, lrf, epochs, is_linear);
     std::cout << ColorString("scheduler: ") << " lrf: " << lrf << " cos_lr: " << (is_linear? " False\n" : " True\n");
 }
 
@@ -554,19 +608,23 @@ void BaseTrainer::resume_training()
 }
 
 void BaseTrainer::save_batch_sample_image(int epoch, int base_epoch, int start_epoch,
-		torch::Tensor data, torch::Tensor targets)
+		torch::Dict<std::string, torch::Tensor>& batch)
 {
+    auto targets = torch::cat({ batch.at("batch_idx").view({-1, 1}),
+                                batch.at("cls").view({-1, 1}),
+                                batch.at("bboxes") }, 1);
+
     if(epoch >= start_epoch && epoch < (start_epoch + 3))
     {   
         //std::cout << "save as start_epoch sample. \n"; 
-        Singleton_PlotBatchImages::getInstance(save_dir)->push_data(data, targets, "batch_train", epoch - start_epoch);
+        Singleton_PlotBatchImages::getInstance(save_dir)->push_data(batch.at("img"), targets, "batch_train", epoch - start_epoch);
     }
     else 
     {
         if(epoch >= base_epoch && epoch < (base_epoch + 3))
         {
             //std::cout << "save as start_epoch force no mosaic. \n" ;
-            Singleton_PlotBatchImages::getInstance(save_dir)->push_data(data, targets, "batch_train"+std::to_string(base_epoch), epoch - start_epoch);
+            Singleton_PlotBatchImages::getInstance(save_dir)->push_data(batch.at("img"), targets, "batch_train"+std::to_string(base_epoch), epoch - start_epoch);
         }
     }
 }
@@ -582,110 +640,14 @@ void BaseTrainer::do_train()
 
     int base_epochs = epochs - std::get<int>(args["close_mosaic"]);
     int ni = 0;
-    std::shared_ptr<v8DetectionLossImpl> compute_loss = std::make_shared<v8DetectionLossImpl>(model.ptr());
+    std::shared_ptr<v8DetectionLossImpl> compute_loss = std::make_shared<v8DetectionLossImpl>(model, this->device);
     // check parameters and optimizer params
-    std::vector<torch::Tensor> pg0, pg1, pg2;
-    for (auto& pair : model->named_parameters())
-    {
-        if (pair.key().find(".bias") != std::string::npos) // no decay
-            pg2.push_back(pair.value());
-        else if (pair.key().find(".weight") != std::string::npos) 
-        {
-            if (pair.key().find("bn.weight") != std::string::npos)
-                pg1.push_back(pair.value());  // no decay
-            else
-                pg0.push_back(pair.value());  // with decay
-        }
-    }
 
-    for (size_t j = 0; j < optimizer->param_groups().size(); j++)
-    {
-        auto opt_params = optimizer->param_groups()[j].params();
-        std::vector<torch::Tensor> params;
-        if (j == 0)
-            params = pg2;
-        else if(j == 1)
-            params = pg0;
-        else
-            params = pg1;
-
-        
-        std::cout << "check parameters " << j <<" params size: " << params.size() << " optim param_group size " << opt_params.size() << std::endl;
-        int erro_count = 0;
-        if (params.size() != opt_params.size())
-            std::cout << "size wrong....:" << params.size() << " " << opt_params.size() << std::endl;
-        for (int i = 0; i < std::min(params.size(), opt_params.size()); i++)
-        {
-            if (params[i].data_ptr() != opt_params[i].data_ptr())
-            {
-                erro_count += 1;
-                std::cout << "data address not equil.." << std::endl;
-            }
-
-            if (opt_params[i].requires_grad() == false)
-                std::cout << j << "-" << i << opt_params[i].name() << " no grad." << std::endl;
-            if(params[i].requires_grad() == false)
-                std::cout << j << "-" << i << params[i].name() <<  " no grad." << std::endl;
-
-        }
-        std::cout << "check group " << j << " error: " << erro_count << std::endl;
-    }
-
-
-#if 0
-    int num_params = 0;
-    int num_params_grad = 0;
-    for (auto param : model->parameters())
-    {
-        num_params += param.numel();
-        if (param.requires_grad())
-            num_params_grad += param.numel();
-    }
-
-    std::cout << "Model layer: " << model->modules(false).size() << 
-        " parameters: " << num_params <<
-        " gradient: " << num_params_grad << std::endl;
-
-    std::cout << "Name modules: " << model->named_modules().size() << std::endl;
-
-
-    if(std::get<bool>(args["enable_step_debug"]))
-    {
-        YoloCustomExample batch;
-        batch.insert("img", load_tensordata_from_file("test_img.pt"));
-        batch.insert("batch_idx", load_tensordata_from_file("test_batch_idx.pt"));
-        batch.insert("cls", load_tensordata_from_file("test_cls.pt"));
-        batch.insert("bboxes", load_tensordata_from_file("test_bboxes.pt"));
-
-        std::vector<torch::Tensor> preds;
-        preds.push_back(load_tensordata_from_file("preds0.pt"));
-        preds.push_back(load_tensordata_from_file("preds1.pt"));
-        preds.push_back(load_tensordata_from_file("preds2.pt"));
-        preds[0] = preds[0].to(device);
-        preds[1] = preds[1].to(device);
-        preds[2] = preds[2].to(device);
-        std::cout << "use unified batch data load over.\n";   
-        for(int test_time = 0; test_time < 5; test_time++)
-        {
-            auto [l, i] = compute_loss->forward(preds, batch);
-            std::cout << "loss: " << l << " item: " << i << std::endl;
-            printf("%16.15f \n", l.item().toFloat());
-        }
-        return;
-    }
-#endif
     std::cout << ColorString("Start training:") << ", start_epoch: " << start_epochs <<" end epochs: " << epochs << " number of batch: " << nb << std::endl;
     optimizer->zero_grad();
-
     for (int epoch = start_epochs; epoch < epochs; epoch++)
     {
         train_loader->cloase_mosaic(epoch >= base_epochs);       
-
-        // 调试代码
-        // for (size_t j = 0; j < optimizer->param_groups().size(); j++)
-        // {
-        //     printf("pg%d lr: %lf\n", int(j), optimizer->param_groups()[j].options().get_lr());
-        // }
 
         scheduler->step();
         model->train();
@@ -697,65 +659,39 @@ void BaseTrainer::do_train()
         auto mloss = torch::zeros({ 3 }).to(device).to(torch::kFloat);
 
         int idx_epoch = 0;
-        int last_opt_step = -1;
-
         for (auto batch : *(train_loader->dataloader))
         {
+            if(plots_flags && epoch < (start_epochs + 3))
+                save_batch_sample_image(epoch, base_epochs, start_epochs, batch);
+
             ni = idx_epoch + nb * epoch;
 
             if (ni <= nw)
                 do_warmup(epoch, ni, nw, nbs, train_loader->get_batch_size());
+                    
+            preprocess_batch(batch);
 
-
-#if 1            
-            if(std::get<bool>(args["use_unified_batch"]))
-            {
-                std::string img_name = "test_img_0_"+std::to_string(idx_epoch)+".pt";
-                std::string batch_idx_name = "test_batch_idx_0_"+std::to_string(idx_epoch)+".pt";
-                std::string cls_name = "test_cls_0_"+std::to_string(idx_epoch)+".pt";
-                std::string bboxes_name = "test_bboxes_0_"+std::to_string(idx_epoch)+".pt";
-                batch.insert("img", load_tensordata_from_file(img_name));
-                batch.insert("batch_idx", load_tensordata_from_file(batch_idx_name));
-                batch.insert("cls", load_tensordata_from_file(cls_name));
-                batch.insert("bboxes", load_tensordata_from_file(bboxes_name));
-                std::cout << "use unified batch data over.\n";
-            }
-#endif            
-
-            auto prepro_data = preprocess_batch(batch);
-
-            int num_targets = prepro_data[1].size(0);
-            if(idx_epoch == 0)
-                save_batch_sample_image(epoch, base_epochs, start_epochs, prepro_data[0], prepro_data[1]);
-            
-            torch::Tensor loss, loss_items;
-            auto input_tensor = prepro_data[0].to(device, true);
-            {   // {}是来限定 set_autocast_enabled（） 的作用域范围
-                at::autocast::set_autocast_enabled(torch::kCUDA, true);
-                auto [pred_t, train_v, mask_t] = model->forward(input_tensor);
-
-                std::tie(loss, loss_items) = compute_loss->forward(train_v, batch);
-            }
+            // 经测试，须按zero_grad, backward, step顺序来，如果采取pytorch一样，后面2、4次累计造成不收敛，
+            // 可能需要保留一些额外信息，暂时没有查找到相关资料
+            auto [pred_t, train_v, mask_t] = model->forward(batch.at("img"));
+            std::tie(loss, loss_items) = compute_loss->forward(train_v, batch);
+            optimizer->zero_grad();
             loss.backward();
 
-            if((ni - last_opt_step) > accumulate)
-            {
-                //torch::nn::utils::clip_grad_norm_(model->parameters(), 10.0);
-                optimizer->step();
-                optimizer->zero_grad();
-                last_opt_step = ni;
-            }
+            // 经测试，无法像pytorch代码中一样，采用累计方式，所以只能按标准的zero_grad, backward, step进行
+            optimizer->step();
+            
             auto vc_lrs = scheduler->get_curstep_lrs();
             char temp_str[200];
-            sprintf(temp_str, "lr0: %lf lr1: %lf lr2: %lf %d %d", vc_lrs[0], vc_lrs[1], vc_lrs[2], accumulate, last_opt_step);
-
-
+            sprintf(temp_str, "lr0: %lf lr1: %lf lr2: %lf", vc_lrs[0], vc_lrs[1], vc_lrs[2]);
             pbar.set_suffix(std::string(temp_str));
+
+            auto num_targets = batch.at("bboxes").size(0);
             pbar.set_prefix(refresh_batch_end_info(epoch, epochs, idx_epoch, num_targets, loss,  mloss, loss_items));
             idx_epoch+=1;
             pbar.update();
         }
-        //scheduler->step(); 做了两次
+        scheduler->step(); //做了两次
         std::cout << std::endl;
 
         on_train_epoch_over(epoch);
@@ -765,24 +701,7 @@ void BaseTrainer::do_train()
 
         }
     }
-}
-
-std::vector<torch::Tensor> BaseTrainer::preprocess_batch(YoloCustomExample& batch)
-{
-    auto imgs = batch.at("img").to(torch::kFloat);
-    imgs.div_(255.f);
-
-    auto bboxes = batch.at("bboxes");
-    auto clses = batch.at("cls");
-    auto batch_idx = batch.at("batch_idx");
-    auto targets = torch::zeros({ bboxes.size(0), 6 },
-        bboxes.options());
-
-    targets.index_put_({ "...", 0 }, batch_idx);
-    targets.index_put_({ "...", 1 }, clses);
-    targets.index_put_({ "...", torch::indexing::Slice(2, torch::indexing::None) },
-        bboxes);
-    return { imgs, targets };
+    on_train_over();
 }
 
 void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
@@ -803,7 +722,7 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
     xi.push_back(float(nw));
     auto lr_lambda = create_lr_lambda(std::get<bool>(args["cos_lr"]), std::get<float>(args["lrf"]), epochs);
 
-    //accumulate = std::roundf(std::max(1.f, linear_interp(ni, xi, { 1.f, float(nbs / batch_size) })));
+    accumulate = std::roundf(std::max(1.f, linear_interp(ni, xi, { 1.f, float(nbs / batch_size) })));
 
     for (size_t j = 0; j < optimizer->param_groups().size(); j++)
     {
@@ -813,25 +732,17 @@ void BaseTrainer::do_warmup(int epoch, int ni, int nw, int nbs, int batch_size)
         std::vector<float> fp = { start_lr, end_lr };
         optimizer->param_groups()[j].options().set_lr(double(linear_interp(float(ni), xi, fp)));
 
-        //x.options().set_lr(double(linear_interp(float(ni), xi, fp)));
         auto& options = optimizer->param_groups()[j].options();
-
-        auto m = linear_interp(ni, xi, {
-        std::get<float>(args["warmup_momentum"]),
-        std::get<float>(args["momentum"])
-            });
+        auto m = linear_interp(ni, xi, { std::get<float>(args["warmup_momentum"]),
+                                        std::get<float>(args["momentum"])});
 
         if (auto sgd_options = dynamic_cast<torch::optim::SGDOptions*>(&options))
         {
             sgd_options->momentum(m);
-            // std::cout << "new momentum: " << sgd_options->momentum() <<" weight_decay: " <<
-            //    sgd_options->weight_decay() << std::endl;
         }
         else if (auto rmsprop_options = dynamic_cast<torch::optim::RMSpropOptions*>(&options))
         {
             rmsprop_options->momentum(m);
-            // std::cout << "new momentum: " << sgd_options->momentum() <<" weight_decay: " <<
-            //    sgd_options->weight_decay() << std::endl;
         }
     }
 }
@@ -860,17 +771,101 @@ void BaseTrainer::on_train_epoch_over(int epoch)
     if (!save_flag && std::get<bool>(args["save"]))
     {
         int save_period = std::get<int>(args["save_period"]);
-        if(((epoch + 1) % save_period) == 0 || (epoch+1) == this->epochs) save_flag = true;
+        if(save_period > 0 && ((epoch + 1) % save_period) == 0) 
+            save_flag = true;
     }
 
     if (save_flag)
     {
-        save_model();
+        save_model(epoch);
     }
 
     // test code 
-    if((epoch+1) == this->epochs)
+    if((epoch+1) == this->epochs)   // 最后一次
     {
-        test_model(model.ptr());
+
     }
 }
+
+void BaseTrainer::on_train_over()
+{
+    test_model(model);
+    save_model(epochs);
+}
+
+void BaseTrainer::save_model(int epoch)
+{
+    torch::serialize::OutputArchive out_arch;
+
+    c10::IValue i_epoch(epochs);
+    out_arch.write("epoch", i_epoch);
+
+    write_envsets_to_pt(out_arch);
+
+    this->model->save_model(out_arch);
+
+    out_arch.save_to(last_pt_file);
+    
+    std::cout << ColorString("Save model: ") << last_pt_file << " over." << std::endl;
+}
+
+// ---------------------  DetectionTrainder --------------------------------
+
+void DetectionTrainer::setup_trainer()
+{
+    setup_model();
+    freeze_modules();
+
+    init_dataloader();
+
+    setup_optimizer();
+    setup_scheduler();
+
+    load_pretrained();
+    resume_training();
+}
+
+void DetectionTrainer::setup_model()
+{
+    auto tmp_cfg_file_path = std::filesystem::path(root_dir).append(std::get<std::string>(args["model"]));
+    std::string cfg_file = "";
+    if (std::filesystem::exists(tmp_cfg_file_path))
+        cfg_file = tmp_cfg_file_path.string();
+    else
+    {
+        LOG(ERROR) << "set model cfg yaml file: " << tmp_cfg_file_path.string() << "not exists.";
+        exit(-1);
+    }
+    model = std::dynamic_pointer_cast<BaseModelImpl>(std::make_shared<ModelImpl>(cfg_file, 3, &args));
+    model->show_modelinfo(std::get<bool>(args["debug_show_info"]));
+    model->to(device);
+}
+
+void DetectionTrainer::init_dataloader()
+{
+    train_loader = std::make_shared<DataloaderBase>(root_dir, args, 32, false, false);
+}
+
+void DetectionTrainer::write_envsets_to_pt(torch::serialize::OutputArchive& out_archive)
+{
+    c10::IValue i_task(std::string("detect"));
+    out_archive.write("task", i_task);
+}
+
+void DetectionTrainer::preprocess_batch(YoloCustomExample& batch)
+{
+    bool non_blocking = this->device.type() == c10::DeviceType::CUDA;
+
+    for (auto& item : batch)
+    {
+        if (item.key() == "img")
+        {
+            auto img = item.value();
+            img = img.to(torch::kFloat);
+            img.div_(255.f);
+            item.setValue(img);
+        }
+        item.setValue(item.value().to(this->device, non_blocking));
+    }
+}
+

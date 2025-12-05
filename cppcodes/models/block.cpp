@@ -1,6 +1,8 @@
 ﻿#include "block.h"
 #include "common.h"
 
+#include "vectorTotuple.h"
+
 //------------------------------ Start DFL ----------------------------
 DFLImpl::DFLImpl(int c1)
 {
@@ -48,26 +50,16 @@ torch::Tensor ProtoImpl::forward(torch::Tensor x)
 
 //------------------------------ Start SPP ----------------------------
 // SPP 参数形式为 [1024, [5, 9, 13]]  SPPF: [1024, 5]
-// 暂时将参数写死，后续修改arg_complex, 能够读取vector<int>
+// 暂时将参数写死，后续修改arg_complex, 能够读取vector<int>, 保留Init_Modules，利用默认参数
 
 SPPImpl::SPPImpl(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    set_params(in_channels, number, args);
-}
-
-void SPPImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     Init_Modules(in_channels, std::get<int>(args[0]));
 }
 
-int SPPImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 void SPPImpl::Init_Modules(int c1, int c2, std::vector<int> k)
 {
-    _out_channel = c2;
+    _out_channels = c2;
 
     int c_ = c1 / 2; //static_cast<int>(std::trunc(float(c1) / 2.0));
 
@@ -90,11 +82,11 @@ void SPPImpl::Init_Modules(int c1, int c2, std::vector<int> k)
 torch::Tensor SPPImpl::forward(torch::Tensor x)
 {
     std::vector<torch::Tensor> outputs;
-    outputs.push_back(cv1->forward(x));
+    outputs.emplace_back(cv1->forward(x));
 
     for (auto& layer : *m)
     {
-        outputs.push_back(layer->as<torch::nn::MaxPool2d>()->forward(x));   //??? x?
+        outputs.emplace_back(layer->as<torch::nn::MaxPool2d>()->forward(x));   //??? x?
     }
 
     return cv2->forward(torch::cat(outputs, 1));
@@ -102,32 +94,17 @@ torch::Tensor SPPImpl::forward(torch::Tensor x)
 //------------------------------ End SPP ----------------------------
 
 //============================== SPPFImpl ===========================
-void SPPFImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int args_size = args.size();
-    if(args_size == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), std::get<int>(args[1]));
-    else if(args_size == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]));
-    else
-    {
-        LOG(ERROR) << "SPPFImpl number args wrong(1 or 2): " << args_size;
-    }
-}
-
-int SPPFImpl::get_outchannels()
-{
-    return _out_channel;
-}
 
 SPPFImpl::SPPFImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    auto params = get_defaults();
+    make_param_from_args<Conf_Params>(params, args);
+    Init_Modules(in_channels, std::get<0>(params), std::get<1>(params));
 }
 
 void SPPFImpl::Init_Modules(int c1, int c2, int k)
 {
-    _out_channel = c2;
+    _out_channels = c2;
     int c_ = c1 / 2;    //static_cast<int>(std::trunc(float(c1) / 2.0));
     int p = k / 2;  // static_cast<int>(std::trunc(k / 2));
 
@@ -142,9 +119,9 @@ void SPPFImpl::Init_Modules(int c1, int c2, int k)
 torch::Tensor SPPFImpl::forward(torch::Tensor x)
 {
     std::vector<torch::Tensor> y;
-    y.push_back(cv1->forward(x));
+    y.emplace_back(cv1->forward(x));
     for (int i = 0; i < 3; i++)
-        y.push_back(m->forward(y.back()));
+        y.emplace_back(m->forward(y.back()));
     return cv2->forward(torch::cat(y, 1));
 }
 //------------------------------ End SPPF ----------------------------
@@ -153,35 +130,15 @@ torch::Tensor SPPFImpl::forward(torch::Tensor x)
 
 C2fImpl::C2fImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    auto params = get_defaults();
+    make_param_from_args<Conf_Params>(params, args);
+    C2fImpl(in_channels, std::get<0>(params), number, std::get<1>(params),
+        std::get<2>(params), std::get<3>(params));
 }
-
 
 C2fImpl::C2fImpl(int c1, int c2, int n, bool shortcut, int g, float e)
 {
-    Init_Modules(c1, c2, n, shortcut, g, e);
-}
-
-void C2fImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int args_size = args.size();
-    if (args_size == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]), number);
-    else if (args_size == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), number,
-            std::get<bool>(args[1]));
-    else
-        std::cout << "C2fImpl arg number wrong(1 or 2): " << args_size;
-}
-
-int C2fImpl::get_outchannels()
-{
-    return this->_out_channel;
-}
-
-void C2fImpl::Init_Modules(int c1, int c2, int n, bool shortcut, int g,  float e)
-{
-    this->_out_channel = c2;
+    this->_out_channels = c2;
     this->_c = int(float(c2) * e);
 
     cv1 = Conv(c1, 2 * this->_c, 1, 1);
@@ -200,7 +157,7 @@ torch::Tensor C2fImpl::forward(torch::Tensor x)
 {
     auto y = cv1->forward(x).chunk(2, 1);
     for (int i = 0; i < m->size(); i++)
-        y.push_back(m[i]->as<Bottleneck>()->forward(y.back()));
+        y.emplace_back(m[i]->as<Bottleneck>()->forward(y.back()));
     
     return cv2->forward(torch::cat(y, 1));
 }
@@ -209,10 +166,10 @@ torch::Tensor C2fImpl::forward_split(torch::Tensor x)
 {
     auto y_split = cv1->forward(x).split({ this->_c, this->_c }, 1);
     std::vector<torch::Tensor> y;
-    y.push_back(y_split[0]);
-    y.push_back(y_split[1]);
+    y.emplace_back(y_split[0]);
+    y.emplace_back(y_split[1]);
     for (int i = 0; i < m->size(); i++)
-        y.push_back(m[i]->as<Bottleneck>()->forward(y.back()));
+        y.emplace_back(m[i]->as<Bottleneck>()->forward(y.back()));
 
     return cv2->forward(torch::cat(y, 1));
 }
@@ -222,56 +179,15 @@ torch::Tensor C2fImpl::forward_split(torch::Tensor x)
 
 C3k2Impl::C3k2Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    auto params = get_defaults();
+    make_param_from_args<Conf_Params>(params, args);
+    Init(in_channels, std::get<0>(params), number,
+        std::get<1>(params), std::get<2>(params), std::get<3>(params), std::get<4>(params));
 }
 
 C3k2Impl::C3k2Impl(int c1, int c2, int n, bool c3k, float e, int g, bool shortcut)
 {
-    Init_Modules(c1, c2, n, c3k, e, g, shortcut);
-}
-
-void C3k2Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int argsize = args.size();
-    if (argsize == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]), number);
-    else if (argsize == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), number,
-            std::get<bool>(args[1]));
-    else if (argsize == 3)
-        Init_Modules(in_channels, std::get<int>(args[0]), number,
-            std::get<bool>(args[1]),
-            std::get<float>(args[2])
-            );
-    else
-        std::cout << "C2fImpl arg number wrong.\n";
-}
-
-int C3k2Impl::get_outchannels()
-{
-    return _out_channel;
-}
-
-void C3k2Impl::Init_Modules(int c1, int c2, int n, bool c3k, float e, int g, bool shortcut)
-{
-    _out_channel = c2;
-    _b_c3k = c3k;
-    _c = int(float(c2) * e);
-
-    cv1 = Conv(c1, 2 * _c, 1, 1);
-    cv2 = Conv((2 + n) * _c, c2, 1);
-    //std::cout << "C3K2Impl: c1 " << c1 << " c2 " << c2 << " c " << c << " e " << e << std::endl;
-
-    register_module("cv1", cv1);
-    register_module("cv2", cv2);
-
-    for (int i = 0; i < n; i++) {
-        if(_b_c3k)
-            m->push_back(C3k(_c, _c, 2, shortcut, g));
-        else
-            m->push_back(Bottleneck(_c, _c, shortcut, g));
-    }
-    register_module("m", m);
+    Init(c1, c2, n, c3k, e, g, shortcut);
 }
 
 torch::Tensor C3k2Impl::forward(torch::Tensor x)
@@ -281,9 +197,9 @@ torch::Tensor C3k2Impl::forward(torch::Tensor x)
     {
         auto tmp = y[y.size() - 1]; // 取队列最后一个
         if(_b_c3k)
-            y.push_back(m[i]->as<C3k>()->forward(tmp));
+            y.emplace_back(m[i]->as<C3k>()->forward(tmp));
         else
-            y.push_back(m[i]->as<Bottleneck>()->forward(tmp));
+            y.emplace_back(m[i]->as<Bottleneck>()->forward(tmp));
     }
     return cv2->forward(torch::cat(y, 1));
 }
@@ -295,11 +211,31 @@ torch::Tensor C3k2Impl::forward_split(torch::Tensor x)
     {
         auto tmp = y[y.size() - 1]; // 取队列最后一个
         if (_b_c3k)
-            y.push_back(m[i]->as<C3k>()->forward(tmp));
+            y.emplace_back(m[i]->as<C3k>()->forward(tmp));
         else
-            y.push_back(m[i]->as<Bottleneck>()->forward(tmp));
+            y.emplace_back(m[i]->as<Bottleneck>()->forward(tmp));
     }
     return cv2->forward(torch::cat(y, 1));
+}
+void C3k2Impl::Init(int c1, int c2, int n, bool c3k, float e, int g, bool shortcut)
+{
+    this->_out_channels = c2;
+    _b_c3k = c3k;
+    _c = int(float(c2) * e);
+
+    cv1 = Conv(c1, 2 * _c, 1, 1);
+    cv2 = Conv((2 + n) * _c, c2, 1);
+
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+
+    for (int i = 0; i < n; i++) {
+        if (_b_c3k)
+            m->push_back(C3k(_c, _c, 2, shortcut, g));
+        else
+            m->push_back(Bottleneck(_c, _c, shortcut, g));
+    }
+    register_module("m", m);
 }
 //------------------------------ End C3k2 ----------------------------
 
@@ -324,37 +260,19 @@ C3kImpl::C3kImpl(int c1, int c2, int n, bool shortcut, int g, float e, int k_)
 }
 //------------------------------ End C3k ----------------------------
 
+//============================== Start C3 ============================
+
 C3Impl::C3Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    auto params = get_defaults();
+    make_param_from_args(params, args);
+    C3Impl(in_channels, std::get<0>(params), number, std::get<1>(params),
+            std::get<2>(params), std::get<3>(params));
 }
 
-//============================== Start C3 ============================
 C3Impl::C3Impl(int c1, int c2, int n, bool shortcut, int g, float e)
 {
-    Init_Modules(c1, c2, n, shortcut, e);
-}
-
-void C3Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int args_size = args.size();
-    if (args_size == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]), number,
-            std::get<bool>(args[1]));
-    else if (args_size == 1)
-        Init_Modules(in_channels, std::get<int>(args[0]), number);
-    else
-        LOG(ERROR) << "C3 number of args wrong (1 or 2): " << args_size;
-}
-
-int C3Impl::get_outchannels()
-{
-    return _out_channel;
-}
-
-void C3Impl::Init_Modules(int c1, int c2, int n, bool shortcut, int g, float e)
-{
-    _out_channel = c2;
+    _out_channels = c2;
     int c_ = int(float(c2) * e);
     cv1 = Conv(c1, c_, 1, 1);
     cv2 = Conv(c1, c_, 1, 1);
@@ -379,6 +297,7 @@ torch::Tensor C3Impl::forward(torch::Tensor x)
 //------------------------------ End C3 ----------------------------
 
 //============================== Start C3x ============================
+
 C3xImpl::C3xImpl(int c1, int c2, int n, bool shortcut, int g, float e)
 {
     int c_ = int(float(c2) * e);
@@ -466,30 +385,18 @@ A2C2fImpl::A2C2fImpl(int c1, int c2, int n, bool a2 , int area, bool residual,
 void A2C2fImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
 {
     // [-1, 4, A2C2f, [512, True, 4/1/-1]] ==> c2 = 512,  n = 4,  a2 = True, area = 4/1/-1
-    int args_size = args.size();
-    if (args_size == 3)
-    {
-        Init_Modules(in_channels, std::get<int>(args[0]), number,
-            std::get<bool>(args[1]), std::get<int>(args[2]));
-    }
-    else if (args_size == 5)
-    {
-        Init_Modules(in_channels, std::get<int>(args[0]), number, std::get<bool>(args[1]),
-            std::get<int>(args[2]), std::get<bool>(args[3]), std::get<int>(args[4]));
-    }
-    else
-        LOG(ERROR) << "A2C2f number of args wrong(3 or 5): " << args_size;
-}
+    auto defs = get_defaults();
+    make_param_from_args<Conf_Params>(defs, args);
 
-int A2C2fImpl::get_outchannels()
-{
-    return _out_channel;
+    Init_Modules(in_channels, std::get<0>(defs), number, std::get<1>(defs),
+        std::get<2>(defs), std::get<3>(defs), std::get<4>(defs), std::get<5>(defs),
+        std::get<6>(defs), std::get<7>(defs));
 }
 
 void A2C2fImpl::Init_Modules(int c1, int c2, int n, bool a2 , int area, bool residual, 
         float mlp_ratio, float e, int g, bool shortcut)
 {
-    _out_channel = c2;
+    _out_channels = c2;
     _a2 = a2;
 
     int c_ = int(float(c2) * e);
@@ -582,14 +489,9 @@ void C2PSAImpl::set_params(int in_channels, int number, std::vector<arg_complex>
         LOG(ERROR) << "C2PSAImpl number of args wrong(1 or 2): " << args_size;
 }
 
-int C2PSAImpl::get_outchannels()
-{
-    return _out_channel;
-}
-
 void C2PSAImpl::Init_Modules(int c1, int c2, int n, float e)
 {
-    _out_channel = c2;
+    _out_channels = c2;
     _c = int(float(c1) * e);
 
     cv1 = Conv(c1, 2*_c, 1, 1);
@@ -621,35 +523,23 @@ torch::Tensor C2PSAImpl::forward(torch::Tensor x)
 
 HyperACEImpl::HyperACEImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    auto params = get_defaults();
+    make_param_from_args<Conf_Params>(params, args);
+
+    Init(in_channels, std::get<0>(params), number,
+        std::get<1>(params),
+        std::get<2>(params),
+        std::get<3>(params),
+        std::get<4>(params),
+        std::get<5>(params),
+        std::get<6>(params));
 }
 
 HyperACEImpl::HyperACEImpl(int c1, int c2, int n, int num_hyperedges, bool dsc3k, bool shortcut, float e1, float e2, std::string context, bool channel_adjust)
 {
-    Init_Modules(c1, c2, n, num_hyperedges, dsc3k, shortcut, e1, e2, context, channel_adjust);
+    Init(c1, c2, n, num_hyperedges, dsc3k, shortcut, e1, e2, context, channel_adjust);
 };
 
-
-void HyperACEImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    if(args.size() != 7)
-    {
-        LOG(ERROR) << "HyperACE need 6 args.";
-        exit(-1);
-    }
-    Init_Modules(in_channels, std::get<int>(args[0]), number,
-        std::get<int>(args[1]),
-        std::get<bool>(args[2]),
-        std::get<bool>(args[3]),
-        std::get<float>(args[4]),
-        std::get<float>(args[5]),  // yolov13.yaml 配置不对，这里与其python代码不清
-        std::get<std::string>(args[6])
-    );
-}
-int HyperACEImpl::get_outchannels()
-{
-    return _out_channel;
-}
 torch::Tensor HyperACEImpl::forward(std::vector<torch::Tensor> x)
 {
     auto x_fuse = fuse->forward(x);
@@ -670,12 +560,9 @@ torch::Tensor HyperACEImpl::forward(std::vector<torch::Tensor> x)
     
     return cv2->forward(torch::cat(y, 1));       
 }
-
-
-void HyperACEImpl::Init_Modules(int c1, int c2, int n, int num_hyperedges, bool dsc3k, bool shortcut,
-    float e1, float e2, std::string context , bool channel_adjust)
+void HyperACEImpl::Init(int c1, int c2, int n, int num_hyperedges, bool dsc3k, bool shortcut, float e1, float e2, std::string context, bool channel_adjust)
 {
-    _out_channel = c2;
+    _out_channels = c2;
     _b_dsc3k = dsc3k;
 
     int c = int(float(c2) * e1);
@@ -690,7 +577,8 @@ void HyperACEImpl::Init_Modules(int c1, int c2, int n, int num_hyperedges, bool 
             DSC3kImpl(int c1, int c2, int n = 1, bool shortcut = true, int g = 1,
                 float e = 0.5, int k1 = 3, int k2 = 5, int d2 = 1)            */
             m->push_back(DSC3k(c, c, 2, shortcut, 1, 0.5, 3, 7));
-        }else{
+        }
+        else {
             m->push_back(DSBottleneck(c, c, shortcut));
         }
     }
@@ -712,39 +600,16 @@ void HyperACEImpl::Init_Modules(int c1, int c2, int n, int num_hyperedges, bool 
 
 DownsampleConvImpl::DownsampleConvImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
-}
-
-DownsampleConvImpl::DownsampleConvImpl(int in_channels, bool _channel_adjust)
-{
-    Init_Modules(in_channels, _channel_adjust);
-}
-
-void DownsampleConvImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
     int args_size = args.size();
     if (args_size == 1)
-        Init_Modules(in_channels, std::get<bool>(args[0]));
+        Init(in_channels, std::get<bool>(args[0]));
     else
         LOG(WARNING) << "default args is empty() == true";
 }
-void DownsampleConvImpl::Init_Modules(int in_channels, bool channel_adjust)
-{
-    _out_channel = channel_adjust ? in_channels * 2 : in_channels;
-    _b_channel_adjust = channel_adjust;
-    downsample = torch::nn::AvgPool2d(torch::nn::AvgPool2dOptions({2, 2}));
-    register_module("downsample", downsample);
 
-    if(channel_adjust)
-    {
-        cv_channel_adjust = Conv(in_channels, in_channels * 2, 1);
-        register_module("channel_adjust", cv_channel_adjust);
-    }
-}
-
-int DownsampleConvImpl::get_outchannels()
+DownsampleConvImpl::DownsampleConvImpl(int in_channels, bool channel_adjust)
 {
-    return _out_channel;
+    Init(in_channels, channel_adjust);
 }
 
 torch::Tensor DownsampleConvImpl::forward(torch::Tensor x)
@@ -753,35 +618,36 @@ torch::Tensor DownsampleConvImpl::forward(torch::Tensor x)
         return downsample->forward(x);
     return cv_channel_adjust->forward(downsample->forward(x));
 }
+void DownsampleConvImpl::Init(int in_channels, bool channel_adjust)
+{
+    _out_channels = channel_adjust ? in_channels * 2 : in_channels;
+    _b_channel_adjust = channel_adjust;
+    downsample = torch::nn::AvgPool2d(torch::nn::AvgPool2dOptions({ 2, 2 }));
+    register_module("downsample", downsample);
+
+    if (channel_adjust)
+    {
+        cv_channel_adjust = Conv(in_channels, in_channels * 2, 1);
+        register_module("channel_adjust", cv_channel_adjust);
+    }
+}
 //-------------------------------- End DownsampleConv -----------------------------
 
 //=============================== Start DSC3k2 ========================
 
 DSC3k2Impl::DSC3k2Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    make_param_from_args<Conf_Params>(def_params, args);
+    Init(in_channels, std::get<0>(def_params), number, std::get<1>(def_params), 
+            std::get<2>(def_params), std::get<3>(def_params),
+            std::get<4>(def_params), std::get<5>(def_params),
+            std::get<6>(def_params), std::get<7>(def_params));
 }
+
 
 DSC3k2Impl::DSC3k2Impl(int c1, int c2, int n, bool dsc3k, float e, int g, bool shortcut, int k1, int k2, int d2)
 {
-    Init_Modules(c1, c2, n, dsc3k, e, g, shortcut, k1, k2, d2);
-}
-
-void DSC3k2Impl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    int args_size = args.size();
-    if (args_size == 3)
-        Init_Modules(in_channels, std::get<int>(args[0]),
-            number,
-            std::get<bool>(args[1]),
-            std::get<float>(args[2])
-        );
-    else if (args_size == 2)
-        Init_Modules(in_channels, std::get<int>(args[0]),
-            number,
-            std::get<bool>(args[1]));
-    else
-        LOG(WARNING) << "default args support 3";
+    Init(c1, c2, n, dsc3k, e, g, shortcut, k1, k2, d2);
 }
 
 torch::Tensor DSC3k2Impl::forward(torch::Tensor x)
@@ -796,18 +662,10 @@ torch::Tensor DSC3k2Impl::forward(torch::Tensor x)
     }
     return cv2->forward(torch::cat(y, 1));
 }
-
-int DSC3k2Impl::get_outchannels()
+void DSC3k2Impl::Init(int c1, int c2, int n, bool dsc3k, float e, int g, bool shortcut, int k1, int k2, int d2)
 {
-    return _out_channel;
-}
-
-void DSC3k2Impl::Init_Modules(int c1, int c2, int n, bool dsc3k, float e, int g, bool shortcut, int k1, int k2, int d2)
-{
-    _out_channel = c2;
+    _out_channels = c2;
     _b_dsc3k = dsc3k;
-
-    //std::cout << "c1 " << c1 << " c2 " << c2 << " n " << n << " g " << g << std::endl;
 
     int c = int(float(c2) * e);
     cv1 = Conv(c1, 2 * c, 1, 1);
@@ -832,7 +690,6 @@ void DSC3k2Impl::Init_Modules(int c1, int c2, int n, bool dsc3k, float e, int g,
     register_module("cv2", cv2);
     register_module("m", m);
 }
-
 //-------------------------------- End DSC3k2 -----------------------------
 
 BottleneckCSPImpl::BottleneckCSPImpl(int c1, int c2, int n, bool shortcut_, int g, float e)
@@ -1342,32 +1199,21 @@ torch::Tensor C3AHImpl::forward(torch::Tensor x)
 
 FullPAD_TunnelImpl::FullPAD_TunnelImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    set_params(in_channels, number, args);
+    Init(in_channels);
 }
 
 FullPAD_TunnelImpl::FullPAD_TunnelImpl(int in_channels)
 {
-    Init_Modules(in_channels);
+    Init(in_channels);
 }
 
-void FullPAD_TunnelImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args)
-{
-    Init_Modules(in_channels);
-}
-
-int FullPAD_TunnelImpl::get_outchannels()
-{
-    return _out_channel;
-}
 
 torch::Tensor FullPAD_TunnelImpl::forward(std::vector<torch::Tensor> x) {
     return x[0] + gate * x[1];
 }
-
-void FullPAD_TunnelImpl::Init_Modules(int in_channels)
+void FullPAD_TunnelImpl::Init(int in_channels)
 {
-    _out_channel = in_channels;
+    _out_channels = in_channels;
     this->gate = register_parameter("gate", torch::tensor(0.0));
 }
-
 //-------------------------------- End FullPAD_TunnelImpl -----------------------------

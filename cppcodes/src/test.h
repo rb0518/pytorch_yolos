@@ -31,7 +31,7 @@ def test(data,
 #include "datasets.h"
 
 Dataloader_Custom test(
-    std::shared_ptr<ModelImpl> model,   // model or nullpytr
+    std::shared_ptr<BaseModelImpl> model,   // model or nullpytr
     std::string root_,          
     VariantConfigs opt,             // opt 
     std::vector<std::string> cls_names,
@@ -51,7 +51,7 @@ Dataloader_Custom test(
 class BaseValidator
 {
 public:
-    BaseValidator(std::shared_ptr<Model> _model_ptr,
+    BaseValidator(std::shared_ptr<BaseModelImpl> _model_ptr,
         VariantConfigs _args_input, std::string _root_dir);
 
     void setup_model();
@@ -79,7 +79,7 @@ protected:
     torch::Dict<std::string, torch::Tensor> _prepare_pred(
         torch::Dict<std::string, torch::Tensor> pred);
 public:
-    std::shared_ptr<Model> model_ptr = { nullptr };
+    std::shared_ptr<BaseModelImpl> model_ptr = { nullptr };
     bool is_training = false;
 
     std::string root_dir;

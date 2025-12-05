@@ -23,6 +23,8 @@
 #include <BaseModel.h>
 #include <torch/torch.h>
 
+#include "vectorTotuple.h"
+
 int autopad(int k, std::optional<int> p = std::nullopt, int d = 1);
 
 /*
@@ -32,20 +34,23 @@ class ConvImpl : public BaseModule
 {
     // def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
 public:
+    using Conf_Params = std::tuple<int, int, int, int, int, int, std::string>;
+    Conf_Params get_defaults() 
+    {
+        return std::make_tuple(0, 1, 1, -1, 1, 1, std::string("True"));
+    }
     ConvImpl(){};
     ConvImpl(int in_channels, int number, std::vector<arg_complex>& args) ;
-
     explicit ConvImpl(int c1, int c2, int k = 1, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True");
     
-    virtual void set_params(int in_channels, int number, std::vector<arg_complex>& args) ;
-    virtual int get_outchannels() ;
+    void set_params(int in_channels, int number, std::vector<arg_complex>& args) ;
 
-    torch::Tensor forward(torch::Tensor x) ;
+    virtual torch::Tensor forward(torch::Tensor x) ;
 
     void fuse_conv_and_bn(bool fused_ = true);
+
 protected:
     int _in_channel;
-    int _out_channel;
     int _kernel_size;
     int _stride;
     std::optional<int> _padding;
@@ -71,17 +76,16 @@ TORCH_MODULE(Conv);
 class Conv2Impl : public ConvImpl
 {
 public:
-    Conv2Impl(){};
-
     //def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True):
+    Conv2Impl(){};
     explicit Conv2Impl(int c1, int c2, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True");
     
-    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) ;
+    //virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) ;
     torch::Tensor forward(torch::Tensor x) ;
 
-protected:
-   
-    void Init_Modules(int c1, int c2, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True" );
+//protected:
+//   
+//    void Init_Modules(int c1, int c2, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int g = 1, int d = 1, std::string act = "True" );
 public:  
 
     torch::nn::Conv2d cv2 {nullptr};
@@ -96,17 +100,9 @@ TORCH_MODULE(Conv2);
 class DWConvImpl : public ConvImpl
 {
 public:
-    DWConvImpl() {};
-    
     //     def __init__(self, c1, c2, k=1, s=1, d=1, act=True):
+    DWConvImpl(){};
     explicit DWConvImpl(int c1, int c2, int k = 1, int s = 1, int d = 1, std::string act = "True");
-   
-    virtual void set_params(int inchannels, int number, std::vector<arg_complex>& args) ;
-
-    torch::Tensor forward(torch::Tensor x) ;
-protected:
-    void Init_Modules(int c1, int c2, int k = 1, int s = 1, int d = 1, std::string act = "True");
-public:
 };
 TORCH_MODULE(DWConv);
 
@@ -147,12 +143,10 @@ public:
         std::optional<int> p = std::nullopt, int g = 1, std::string act = "True");
     
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels();
+    // int get_outchannels();
 
     torch::Tensor forward(torch::Tensor x);
 private:
-    int _out_channel;
-
     Conv conv{ nullptr };
 
     void Init_Modules(int c1, int c2, int k = 1, int s = 1,
@@ -170,7 +164,7 @@ public:
     ConcatImpl(int in_channels, int number, std::vector<arg_complex>& args);
 
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels() ;
+    // int get_outchannels() ;
 
     torch::Tensor forward(std::vector<torch::Tensor> x) ;
 public:
@@ -191,13 +185,12 @@ public:
     // def __init__(self, c1, c2, k=1, s=1, g=1, act=True):
     explicit GhostConvImpl(int c1, int c2, int k = 1, int s = 1, int g = 1, std::string act="True");
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels() ;    
+    // int get_outchannels() ;    
 
     torch::Tensor forward(torch::Tensor x) ;
 protected:
-    int _out_channel;
-
     void Init_Modules(int c1, int c2, int k = 1, int s = 1, int g = 1, std::string act = "True");
+
 public:
     Conv cv1;
     Conv cv2;
@@ -231,15 +224,13 @@ public:
     explicit ConvTransposeImpl(int c1, int c2, int k = 2, int s = 2, int p = 0, bool bn = true, std::string act = "True");
     
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels() ;
+    // int get_outchannels() ;
 
     torch::Tensor forward(torch::Tensor x) ;
 
     void fuse_conv_and_bn(bool fused_ = true);
 
 protected:
-    int _out_channel;
-
     void Init_Modules(int c1, int c2, int k = 2, int s = 2, int p = 0, bool bn = true, std::string act = "True");
 
 public:
@@ -336,13 +327,11 @@ public:
         std::optional<int> p = std::nullopt, int d = 1, bool bias = false);
     
     void set_params(int in_channels, int number, std::vector<arg_complex>& args);
-    int get_outchannels() ;   
+    // int get_outchannels() ;   
     
     torch::Tensor forward(torch::Tensor x);
 
 protected:
-    int _out_channel;
-
     void Init_Modules(int c_in, int c_out, int k = 3, int s = 1, std::optional<int> p = std::nullopt, int d = 1, bool bias = false);
 
 public:

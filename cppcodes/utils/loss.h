@@ -100,7 +100,7 @@ TORCH_MODULE(BboxLoss);
 class v8DetectionLossImpl
 {
 public:
-    v8DetectionLossImpl(std::shared_ptr<ModelImpl> model, int tal_topk = 10);
+    v8DetectionLossImpl(std::shared_ptr<BaseModelImpl> model, torch::Device _device, int tal_topk = 10);
     std::tuple<torch::Tensor, torch::Tensor> forward(std::vector<torch::Tensor>& preds,
          torch::Dict<std::string, torch::Tensor>& batch);
 public:
@@ -113,6 +113,10 @@ public:
     bool use_dfl;
     VariantConfigs* hyp;
 
+    float dfl_ratio = 1.0;
+    float box_ratio = 1.0;
+    float cls_ratio = 1.0;
+  
     TaskAlignedAssigner assigner{ nullptr };
     BboxLoss bbox_loss{ nullptr };
     torch::Tensor proj;

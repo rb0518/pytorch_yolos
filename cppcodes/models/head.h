@@ -56,7 +56,7 @@
 class DetectImpl : public torch::nn::Module 
 {
 public:
-    DetectImpl(int _nc, std::vector<int> _ch);  
+    DetectImpl(int _nc, std::vector<int> _ch, bool _legacy);  
 
     std::tuple<torch::Tensor, std::vector<torch::Tensor>>
         forward(std::vector<torch::Tensor> x);

@@ -20,13 +20,14 @@ struct StackSequentailImpl : torch::nn::SequentialImpl {
 
 TORCH_MODULE(StackSequentail);
 
-DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/)
+DetectImpl::DetectImpl(int _nc /*= 80*/, std::vector<int> _ch /*= {}*/, bool _legacy /*= false*/)
 {
     nc = _nc;               // number of classes
     nl = _ch.size();        // number of detection layers
     reg_max = 16;           // DFL channels(ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
     no = nc + reg_max * 4;  // number of ouputs per anchors
     stride = torch::zeros({nl});
+    legacy = _legacy;
 
     //std::cout << "ch: [ " << _ch[0] <<" " << _ch[1] << " " << _ch[2] << " ]\n";
     c2 = std::max(16, std::max(_ch[0] / 4, reg_max * 4));
@@ -127,7 +128,7 @@ DetectImpl::forward_end2end(std::vector<torch::Tensor> x)
 {
     std::vector<torch::Tensor> x_detach;
     for (const auto& xi : x) {
-        x_detach.push_back(xi.detach());
+        x_detach.emplace_back(xi.detach());
     }
 
     std::vector<torch::Tensor> one2one;
@@ -139,7 +140,7 @@ DetectImpl::forward_end2end(std::vector<torch::Tensor> x)
         auto cv2_output = o2o_cv2->forward(x_detach[i]);
         auto cv3_output = o2o_cv3->forward(x_detach[i]);
 
-        one2one.push_back(torch::cat({ cv2_output, cv3_output }, 1));
+        one2one.emplace_back(torch::cat({ cv2_output, cv3_output }, 1));
     }
 
     // 处理输入张量x

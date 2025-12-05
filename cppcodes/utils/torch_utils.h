@@ -7,13 +7,14 @@
 // dev_set: "CUDA"、"CPU"、"GPU" or "0"...
 torch::Device get_device(const std::string& dev_set);
 
-std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<ModelImpl> ptr_model, 
+std::tuple<std::shared_ptr<torch::optim::Optimizer>, int, float> smart_optimizer(std::shared_ptr<BaseModelImpl> model, 
                                     VariantConfigs& args);
 
 
 void save_checkpoint(std::string filename, torch::nn::Module* model,
     std::shared_ptr<torch::optim::Optimizer> optimizer, int epoch);
-                     
+    
+#if 0                     
 // 没有deepcopy，同时不想重构Model来支持Module.clone() 
 class ModelEMA {
 public:
@@ -30,5 +31,5 @@ public:
     float decay_;
     int updates_ = 0;
 };    
-
+#endif
 void module_sub_info(torch::nn::Module& sub_module, const std::string key, int sub_step);

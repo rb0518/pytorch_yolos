@@ -88,8 +88,9 @@ int make_divisible(int x, int divisor) {
     else if(className == #LAYER_NAME) \
     { \
         auto layer = LAYER_NAME(in_channels, number, args); \
-        modulelist->push_back(layer); \
-        return layer->get_outchannels(); \
+        auto out_ch = layer->get_outchannels(); \
+        modulelist->push_back(layer.ptr()); \
+        return out_ch; \
     }    
 
 int AppendLayer(torch::nn::ModuleList& modulelist, 
@@ -129,41 +130,42 @@ int AppendLayer(torch::nn::ModuleList& modulelist,
     return 0;
 }
 #endif
-
-std::shared_ptr<BaseModule> createObject(const std::string& className) {
-    static std::map<std::string, std::function<std::shared_ptr<BaseModule>()>> factories;
+#if 1
+std::shared_ptr<BaseModule> createObject(const std::string& className, 
+    int in_channels, int number, std::vector<arg_complex> args) {
+    static std::map<std::string, std::function<std::shared_ptr<BaseModule>(int, int, std::vector<arg_complex>)>> factories;
 
     // 初始化工厂映射表（这里仅作为示例）
     if (factories.empty()) {
-        factories["Conv"] = []() { return std::make_shared<ConvImpl>(); };
-        factories["C3"] = []() { return std::make_shared<C3Impl>(); };
-        factories["Concat"] = []() { return std::make_shared<ConcatImpl>(); };
-        factories["SPPF"] = []() { return std::make_shared<SPPFImpl>(); };
-        factories["SPP"] = [](){ return std::make_shared<SPPImpl>(); };       
-        factories["nn.Upsample"] = []() { return std::make_shared<nnUpsampleImpl>(); };
-        factories["Focus"] = [](){ return std::make_shared<FocusImpl>(); };
-        factories["Contract"] = []() { return std::make_shared<ContractImpl>(); };
-        factories["Expand"] = []() { return std::make_shared<ExpandImpl>(); };
-        factories["C3k2"] = []() { return std::make_shared<C3k2Impl>(); };
-        factories["A2C2f"] = []() { return std::make_shared<A2C2fImpl>(); };
-        factories["C2PSA"] = []() { return std::make_shared<C2PSAImpl>(); };
+        factories["Conv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ConvImpl>(in_channels, number, args); };
+        factories["C3"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C3Impl>(in_channels, number, args); };
+        factories["Concat"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ConcatImpl>(in_channels, number, args); };
+        factories["SPPF"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<SPPFImpl>(in_channels, number, args); };
+        factories["SPP"] = [](int in_channels, int number, std::vector<arg_complex> args){ return std::make_shared<SPPImpl>(in_channels, number, args); };       
+        factories["nn.Upsample"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<nnUpsampleImpl>(in_channels, number, args); };
+        factories["Focus"] = [](int in_channels, int number, std::vector<arg_complex> args){ return std::make_shared<FocusImpl>(in_channels, number, args); };
+        factories["Contract"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ContractImpl>(in_channels, number, args); };
+//        factories["Expand"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ExpandImpl>(in_channels, number, args); };
+        factories["C3k2"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C3k2Impl>(in_channels, number, args); };
+        factories["A2C2f"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<A2C2fImpl>(in_channels, number, args); };
+        factories["C2PSA"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C2PSAImpl>(in_channels, number, args); };
 
         // 2025-11-1 add for v13      
-        factories["DSConv"] = []() { return std::make_shared<DSConvImpl>(); };
-        factories["HyperACE"] = []() { return std::make_shared<HyperACEImpl>(); };
-        factories["DownsampleConv"] = []() { return std::make_shared<DownsampleConvImpl>(); };
-        factories["FullPAD_Tunnel"] = []() { return std::make_shared<FullPAD_TunnelImpl>(); };
-        factories["DSC3k2"] = []() { return std::make_shared<DSC3k2Impl>(); };
+        factories["DSConv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DSConvImpl>(in_channels, number, args); };
+        factories["HyperACE"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<HyperACEImpl>(in_channels, number, args); };
+        factories["DownsampleConv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DownsampleConvImpl>(in_channels, number, args); };
+        factories["FullPAD_Tunnel"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<FullPAD_TunnelImpl>(in_channels, number, args); };
+        factories["DSC3k2"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DSC3k2Impl>(in_channels, number, args); };
     }
 
     auto it = factories.find(className);
     if (it != factories.end()) {
-        return it->second();
+        return it->second(in_channels, number, args);
     } else {
         throw std::invalid_argument("Unknown class name: " + className);
     }
 }
-
+#endif
 std::shared_ptr<DetectImpl> ModelImpl::getLastModulePtr()
 {
     if (_modules.is_empty()) return nullptr;
@@ -172,75 +174,47 @@ std::shared_ptr<DetectImpl> ModelImpl::getLastModulePtr()
         std::dynamic_pointer_cast<DetectImpl>(_modules[_modules->size() - 1]) : nullptr;
 }
 
-ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, int imageheight, int channels,  VariantConfigs* args)
+// ==================         ModelImple         =======================================
+
+ModelImpl::ModelImpl(std::string model_file, int channels, VariantConfigs* args)
+    : BaseModelImpl(model_file, channels, args)
 {
-    set_args_prt(args);
+    init_model();
+}
 
-    n_classes = classes;
-    image_width = imagewidth;
-    image_height = imageheight;
-    n_channels = channels;
-
-    cfgfile = yaml_file;
-    if(b_showdebug)
-        std::cout << "Config YAML file: " << yaml_file << std::endl;
-    std::string new_yamlfile = yaml_file;
-    auto guess_yaml_task = [](std::string& filepath) {
-        // 如给定为/path/to/yolov12n.yaml，但实际目录下只有yolov12.yaml, 人为指定scales="n"
-            std::filesystem::path fs_fullpath = std::filesystem::path(filepath);
-            bool fileexists_flag = std::filesystem::exists(fs_fullpath);
-            auto [is_right, v, s, t] = parse_yolo_config(fs_fullpath.filename().string());
-            if (false == is_right)
-            {
-                LOG(ERROR) << "cfg filename can't guess yolo version etc." << fs_fullpath.filename().string();
-                return std::make_tuple(is_right, v, s, t, filepath);
-            }
-
-            if (s == "") 
-            {
-                s = "n";   // 默认取"n"
-            }
-            else {
-                if (!fileexists_flag)
-                {
-                    std::string stem_name = fs_fullpath.stem().string();
-                    size_t pos = stem_name.find(s);
-                    if(pos != std::string::npos) 
-                        stem_name.erase(pos, s.length());
-                    filepath = fs_fullpath.parent_path().append(stem_name + fs_fullpath.extension().string()).string();
-                }
-            }
-            return std::make_tuple(is_right, v, s, t, filepath);
-        };
-
-    auto [is_right, v, s, t, new_file] = guess_yaml_task(new_yamlfile);
-    if(false == is_right) 
+void ModelImpl::load_modelsets()
+{
+    std::string file_ext = std::filesystem::path(cfg_file).extension().string();
+    if (file_ext == ".yaml")
     {
-        LOG(ERROR) << "can't guess the cfg filename. "; 
-        exit(-1);
+        load_model_from_yaml();
     }
-    yolo_version = v;
-    scale_id = s;
-    task = t;
-
-    if (b_showdebug)
+    else if (file_ext == ".pt")
     {
-        std::cout << "guess cfgs: " << (is_right ? "true" : "false") << " v " << v << " sacle: " << s << " task: "
-            << (t.empty() ? "Detect" : t) << std::endl;
-
-        std::cout << "old path: " << yaml_file << "\n";
-        std::cout << "exits path: " << new_file << "\n";
+        auto ret = load_model_from_ptfile();
+        if (std::get<0>(ret))
+        {
+            this->imgsz = std::get<1>(ret);
+            this->scale_id = std::get<2>(ret);
+            std::cout << "load imgsz: " << this->imgsz << " scale_id: " << scale_id << std::endl;
+        }
     }
+    else
+        LOG(ERROR) << "model set file must be .yaml or .pt extension: " << file_ext ;
 
+    parse_model_sets();
+}
 
-    readconfigs(new_file);
+void ModelImpl::create_modelsets()
+{
     create_modules();
 
     this->train();
-    torch::Tensor img_tmp = torch::zeros({ 1, channels, imageheight, imagewidth });
+    std::wcout << "channels: " << this->n_channels << " imgsz: " << this->imgsz << std::endl;
+    torch::Tensor img_tmp = torch::zeros({ 1, this->n_channels, this->imgsz, this->imgsz});
     img_tmp = img_tmp.to(this->named_parameters().begin()->value().device());
 
-    // std::cout << "create stride , input image: " << img_tmp.sizes() << std::endl;
+    std::cout << "create stride , input image: " << img_tmp.sizes() << std::endl;
 
     torch::Tensor pred;
     std::vector<torch::Tensor> train_ret(3);
@@ -248,23 +222,278 @@ ModelImpl::ModelImpl(const std::string& yaml_file, int classes, int imagewidth, 
     std::tie(pred, train_ret, pred_seg) = forward(img_tmp);
     std::vector<int> strides;
     for(int i = 0; i < train_ret.size(); i++) {       // [bs, na, h, w, no]
-        strides.emplace_back(image_height / train_ret[i].size(2));
+        strides.emplace_back(imgsz / train_ret[i].size(2));
     }
     auto last_module = getLastModulePtr();
     
     last_module->stride = torch::tensor(strides);
     
     stride = last_module->stride;
-    last_module->bias_init(); 
+}
+
+void ModelImpl::init_weights()
+{
+    auto last_module = getLastModulePtr();
+    last_module->bias_init();
     std::cout << "bias_init: over" << std::endl;
+    
     initialize_weights();
     std::cout << "initialize_weights: over" << std::endl;
 }
 
+void ModelImpl::load_weights(torch::serialize::InputArchive& in_archive)
+{
+    torch::serialize::InputArchive model_arch;
+    if(in_archive.try_read("model", model_arch))
+    {
+        this->load(model_arch);
+    }
+    else
+        LOG(WARNING) << "can't load weight from pt file.";
+}
+
+void ModelImpl::save_model(torch::serialize::OutputArchive& out_archive)
+{
+    c10::IValue i_imgsz(this->imgsz);
+    c10::IValue i_scale_id(this->scale_id);
+    c10::IValue i_task(std::string("detect"));
+    out_archive.write("imgsz", i_imgsz);
+    out_archive.write("scale", i_scale_id);
+    out_archive.write("task", i_task);
+    torch::Tensor cfg_tensor = convertMemoryToTensor(this->cfg_buffer); 
+    out_archive.write("cfgs", cfg_tensor);
+
+    torch::serialize::OutputArchive model_arch;
+    this->save(model_arch);
+    out_archive.write("model", model_arch);
+}
+
+torch::Tensor ModelImpl::get_stride()
+{
+    return this->stride;
+}
+
+int ModelImpl::get_regmax()
+{
+    auto last_module = getLastModulePtr();
+    return last_module->reg_max;
+}
+
+void ModelImpl::load_model_from_yaml()
+{
+    std::string cfgfile(cfg_file);
+
+    std::string new_yamlfile = cfg_file;
+    auto guess_yaml_task = [](std::string& filepath) {
+        // 如给定为/path/to/yolov12n.yaml，但实际目录下只有yolov12.yaml, 人为指定scales="n"
+        std::filesystem::path fs_fullpath = std::filesystem::path(filepath);
+        bool fileexists_flag = std::filesystem::exists(fs_fullpath);
+        auto [is_right, v, s, t] = parse_yolo_config(fs_fullpath.filename().string());
+        if (false == is_right)
+        {
+            LOG(ERROR) << "cfg filename can't guess yolo version etc." << fs_fullpath.filename().string();
+            return std::make_tuple(is_right, v, s, t, filepath);
+        }
+
+        if (s == "")
+        {
+            s = "n";   // 默认取"n"
+        }
+        else {
+            if (!fileexists_flag)
+            {
+                std::string stem_name = fs_fullpath.stem().string();
+                size_t pos = stem_name.find(s);
+                if (pos != std::string::npos)
+                    stem_name.erase(pos, s.length());
+                filepath = fs_fullpath.parent_path().append(stem_name + fs_fullpath.extension().string()).string();
+            }
+        }
+        return std::make_tuple(is_right, v, s, t, filepath);
+        };
+
+    auto [is_right, v, s, t, new_file] = guess_yaml_task(new_yamlfile);
+    if (false == is_right)
+    {
+        LOG(ERROR) << "can't guess the cfg filename. ";
+        exit(-1);
+    }
+
+    this->model_version = v;
+    this->scale_id = s;
+    this->task_name = t;
+
+    if (b_showdebug)
+    {
+        std::cout << "guess cfgs: " << (is_right ? "true" : "false") << " v " << v << " sacle: " << s << " task: "
+            << (t.empty() ? "Detect" : t) << std::endl;
+
+        std::cout << "old path: " << cfgfile << "\n";
+        std::cout << "exits path: " << new_file << "\n";
+    }
+
+    readModelCfgFile(new_file);
+}
+
+/*
+* 从pt文件中读取训练时的重要配置，cfgs-->yaml int--> imgsz,  std::string-->scale_key
+*/
+std::tuple<bool, int, std::string> ModelImpl::load_model_from_ptfile()
+{
+    torch::serialize::InputArchive domain_arch;
+    domain_arch.load_from(this->cfg_file);
+    torch::Tensor read_cfgs;
+    if (domain_arch.try_read("cfgs", read_cfgs))
+    {
+        std::cout << "read cfg tensor: " << read_cfgs.sizes() << " " << std::endl;
+        convertTensorToMemory(read_cfgs, cfg_buffer);
+    }
+    else
+    {
+        LOG(ERROR) << "can't load cfgs settings from: " << cfg_file;
+        return std::make_tuple(false, 0, "");
+    }
+    c10::IValue i_scale;
+    std::string tmp_scale;  // scale_id
+    if (domain_arch.try_read("scale", i_scale))
+    {
+        tmp_scale = i_scale.toStringRef();
+    }
+    else
+    {
+        LOG(ERROR) << "can't load scale settings from: " << cfg_file;
+        return std::make_tuple(false, 0, "");
+    }
+
+    c10::IValue i_imgsz;
+    int tmp_imgsz;
+    if (domain_arch.try_read("imgsz", i_imgsz))
+    {
+        tmp_imgsz = i_imgsz.toInt();
+    }
+    else
+    {
+        LOG(ERROR) << "can't load image size settings from: " << cfg_file;
+        return std::make_tuple(false, 0, "");
+    }
+    return std::make_tuple(true, tmp_imgsz, tmp_scale);
+}
+
+void ModelImpl::parse_model_sets()
+{
+    YAML::Node cfgs = YAML::Load((const char*)cfg_buffer.data());
+    if(b_showdebug)
+        std::cout << "cfg_buffer size: " << cfg_buffer.size() << "\n" << cfgs << std::endl;
+
+    int nc = cfgs["nc"].as<int>();
+    if (nc != n_classes) {
+        LOG(WARNING) << "read nc " << nc << " no equil n_classes: " << n_classes << " check cfg yaml.";
+        n_classes = nc;
+    }
+
+    if (cfgs["depth_multiple"].IsDefined())
+    {   // 旧格式文件中是放在一块的
+        depth_multiple = cfgs["depth_multiple"].as<float>();
+        width_multiple = cfgs["width_multiple"].as<float>();
+    }
+    else if (cfgs["scales"].IsDefined())
+    {
+        if (b_showdebug)
+            std::cout << "use new stype cfg yaml. \n";
+        YAML::Node node_scales = cfgs["scales"];
+        if (node_scales[scale_id].IsDefined())
+        {
+            std::vector<float> n_scale = node_scales[scale_id].as<std::vector<float>>();
+            std::cout << "scale: " << scale_id << " - depth: " << n_scale[0] << " width: " << n_scale[1] << " max_channels: " << int(n_scale[2]) << std::endl;
+            depth_multiple = n_scale[0];
+            width_multiple = n_scale[1];
+            n_maxchannels = int(n_scale[2]);
+        }
+    }
+    else
+    {
+        LOG(ERROR) << "not found depth & width multiple and not found scales Node. \n";
+    }
+
+    // load anchors
+    if (cfgs["anchors"].IsDefined())
+    {
+        YAML::Node node_anchors = cfgs["anchors"];
+        if (!node_anchors.IsNull() && node_anchors.IsSequence())
+        {
+            for (YAML::const_iterator it = node_anchors.begin(); it != node_anchors.end(); ++it) {
+                if ((*it).IsSequence()) {
+                    anchors.push_back(it->as<std::vector<float>>());
+                }
+                else
+                    LOG(ERROR) << "The yaml anchors define not suppert.";
+            }
+        }
+    }
+
+    YAML::Node node_backbone = cfgs["backbone"];
+    YAML::Node node_head = cfgs["head"];
+
+    int total_layers = node_backbone.size() + node_head.size();
+
+    auto read_one_layer = [&](YAML::Node& cfgs)
+        {
+            YoloLayerDef layer;
+            // froms 
+            if (cfgs[0].IsSequence())
+            {
+                layer.froms = cfgs[0].as<std::vector<int>>();
+            }
+            else
+                layer.froms.push_back(cfgs[0].as<int>());
+
+            layer.number = cfgs[1].as<int>();
+            layer.name = cfgs[2].as<std::string>();
+
+            if (layer.name == "DownsampleConv" || layer.name == "FullPAD_Tunnel")
+            {
+                //std::cout << cfgs[3] << std::endl;
+                layer.add_one_arg("None");
+            }
+            else
+            {
+                for (auto e : cfgs[3])
+                {
+                    if (e.IsSequence())  // 针对SPP中第二参数为数组，修正
+                    {
+                        std::stringstream temp;
+                        temp << e.as<std::vector<float>>();
+                        layer.add_one_arg(temp.str());
+                    }
+                    else if (e.as<std::string>() != "")
+                    {
+                        layer.add_one_arg(e.as<std::string>());
+                    }
+                    else
+                    {
+                        std::cout << "read yaml return empty string" << std::endl;
+                        layer.add_one_arg("None");
+                    }
+                }
+            }
+            return layer;
+        };
+
+    for (int i = 0; i < node_backbone.size(); i++)
+    {
+        YAML::Node layer = node_backbone[i];
+        layer_cfgs.push_back(read_one_layer(layer));
+    }
+
+    for (int i = 0; i < node_head.size(); i++)
+    {
+        YAML::Node layer = node_head[i];
+        layer_cfgs.push_back(read_one_layer(layer));
+    }
+}
+
 std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::forward(torch::Tensor x)
 {
-//    std::cout << "Start forward() total layers: " << _modules->size()  << std::endl;
-
     if(detect_outs.size() != 3)
     {
         detect_outs.resize(3);
@@ -281,8 +510,8 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
 
     for(int i = 0; i < _modules->size()-1; i++) // no include last module -- Detect
     {
-        // if(b_showdebug)
-        //     std::cout << "run layer: " << i << std::endl;
+        if(b_showdebug)
+            std::cout << "run layer: " << i << std::endl;
 
         std::vector<torch::Tensor> inputs = (i == 0) ? std::vector<torch::Tensor>{x} : get_layer_inputs(i);
         
@@ -307,129 +536,16 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>, torch::Tensor> ModelImpl::
     return { detect_pred, detect_outs, segment_pred};
 }
 
-void ModelImpl::readconfigs(const std::string& yaml_file, std::string scale_id /*= "n"*/)
-{
-    YAML::Node cfgs = YAML::LoadFile(yaml_file);
-   
-    int nc = cfgs["nc"].as<int>();
-    if(nc != n_classes){
-        LOG(WARNING) << "read nc " << nc << " no equil n_class. check cfg yaml.";
-    }
-
-    if (cfgs["depth_multiple"].IsDefined())
-    {   // 旧格式文件中是放在一块的
-        depth_multiple = cfgs["depth_multiple"].as<float>();
-        width_multiple = cfgs["width_multiple"].as<float>();
-    }
-    else if(cfgs["scales"].IsDefined())
-    {
-        if(b_showdebug)
-            std::cout << "use new stype cfg yaml. \n";
-        YAML::Node node_scales = cfgs["scales"];
-        if (node_scales[scale_id].IsDefined())
-        {
-            std::vector<float> n_scale = node_scales[scale_id].as<std::vector<float>>();
-            std::cout << "scale: " << scale_id <<" - depth: " << n_scale[0] << " width: " << n_scale[1] << " max_channels: " << int(n_scale[2]) << std::endl;
-            depth_multiple = n_scale[0];
-            width_multiple = n_scale[1];
-            n_maxchannels = int(n_scale[2]);
-        }
-    }
-    else
-    {
-        LOG(ERROR) << "not found depth & width multiple and not found scales Node. \n";
-    }
-
-
-    // load anchors
-    if (cfgs["anchors"].IsDefined())
-    {
-        YAML::Node node_anchors = cfgs["anchors"];
-        if (!node_anchors.IsNull() && node_anchors.IsSequence())
-        {
-            for (YAML::const_iterator it = node_anchors.begin(); it != node_anchors.end(); ++it) {
-                if ((*it).IsSequence()) {
-                    anchors.push_back(it->as<std::vector<float>>());
-                }
-                else
-                    LOG(ERROR) << "The yaml anchors define not suppert.";
-            }
-        }
-    }
-   
-    YAML::Node node_backbone = cfgs["backbone"];
-    YAML::Node node_head = cfgs["head"];
-
-    int total_layers = node_backbone.size() + node_head.size();
-
-    auto read_one_layer =[&](YAML::Node& cfgs)
-    {
-        YoloLayerDef layer;
-        // froms 
-        if(cfgs[0].IsSequence())
-        {
-            layer.froms = cfgs[0].as<std::vector<int>>();
-        }
-        else
-            layer.froms.push_back(cfgs[0].as<int>());
-
-        layer.number = cfgs[1].as<int>();
-        layer.name = cfgs[2].as<std::string>();
-
-        if(layer.name == "DownsampleConv" || layer.name == "FullPAD_Tunnel")
-        {
-            //std::cout << cfgs[3] << std::endl;
-            layer.add_one_arg("None");
-        }
-        else
-        {
-            for(auto e : cfgs[3])
-            {
-                if(e.IsSequence())  // 针对SPP中第二参数为数组，修正
-                {
-                    std::stringstream temp;
-                    temp << e.as<std::vector<float>>();
-                    layer.add_one_arg(temp.str());
-                }
-                else if(e.as<std::string>()!="")
-                {
-                    layer.add_one_arg(e.as<std::string>());
-                }
-                else
-                {
-                    std::cout << "read yaml return empty string" << std::endl;
-                    layer.add_one_arg("None");
-                }
-            }
-        }
-        return layer;
-    };
-
-    for(int i = 0; i < node_backbone.size(); i++)
-    {
-        YAML::Node layer = node_backbone[i];
-        layer_cfgs.push_back(read_one_layer(layer));
-    }
-
-    for(int i = 0; i < node_head.size(); i++)
-    {
-        YAML::Node layer = node_head[i];
-        layer_cfgs.push_back(read_one_layer(layer));    
-    }
-}
-
 void ModelImpl::create_modules()
 {
-   for (int i = 0; i < layer_cfgs.size() - 1; i++)
+    std::vector<int> layer_out_chs;     // 记录每层out_channels
+    for (int i = 0; i < layer_cfgs.size() - 1; i++)
     {
         if(b_showdebug)
             std::cout << "\n create layer " << i << " " << layer_cfgs[i].name << std::endl;
-        int ch_in = i == 0 ? this->n_channels : layer_out_chs[i - 1];
-        if(layer_cfgs[i].froms[0] > 0)  // v13版本中的配置里，除-1, []之外，还有单个不为-1的变量
-            ch_in =  layer_out_chs[layer_cfgs[i].froms[0]];
-
+        int ch_in = i == 0 ? this->n_channels : layer_out_chs[(i + layer_cfgs[i].froms[0])%i];  // // v13版本中的配置里，除-1, []之外，还有单个不为-1的变量
         int n = layer_cfgs[i].number;
-        if(layer_cfgs[i].number > 1)
+        if(n > 1)
         {
             if(b_showdebug)
                 std::cout << i << " " << layer_cfgs[i].name << " source n " << n;
@@ -450,6 +566,7 @@ void ModelImpl::create_modules()
             if(layer_cfgs[i].name == "C3k2" ||layer_cfgs[i].name =="DSC3k2")
             {
                 legacy = false;
+                std::cout << " ch_in: " << ch_in << " c2: " << c2 << std::endl;
                 if(scales_key[scale_id] >= scales_key["m"])
                 {
                     if(b_showdebug)
@@ -462,16 +579,7 @@ void ModelImpl::create_modules()
             if(layer_cfgs[i].name == "A2C2f")
             {
                 legacy = false;
-                /*
-                    if scale in "lx":  # for L/X sizes
-                        args.extend((True, 1.2))
-                    # https://github.com/iMoonLab/yolov13   
-                    if m is A2C2f: 
-                        legacy = False
-                        if scale in "lx":  # for L/X sizes
-                            args.append(True)
-                            args.append(1.5) 
-                */
+
                 if(scales_key[scale_id] >= scales_key["l"])
                 {
                     layer_cfgs[i].args[3] = true;
@@ -481,16 +589,18 @@ void ModelImpl::create_modules()
             if(layer_cfgs[i].name == "HyperACE")
             {
                 ch_in = layer_out_chs[layer_cfgs[i].froms[1]];
+
                 int he = std::get<int>(layer_cfgs[i].args[1]);
                 if(scales_key[scale_id] == scales_key["n"])
                 {
-                    he = he * 0.5;
+                    he *= 0.5;
                 }
                 else if(scales_key[scale_id] == scales_key["x"])
                 {
-                    he = he * 1.5;
+                    he *= 1.5;
                 }
                 layer_cfgs[i].args[1] = he;
+
                 if(scales_key[scale_id] >= scales_key["l"])
                 {
                     layer_cfgs[i].args.push_back(false);
@@ -501,16 +611,11 @@ void ModelImpl::create_modules()
         {
             if(layer_cfgs[i].name == "DownsampleConv")
             {
-                layer_cfgs[i].args[0] = true;   //将前面补的[nodefine] ==> [true]
-                if(scales_key[scale_id] >= scales_key["l"])
-                {
-                    layer_cfgs[i].args[0] = false;
-                }
+                layer_cfgs[i].args[0] = (scales_key[scale_id] >= scales_key["l"]) ? false : true;
             }
             else if(layer_cfgs[i].name == "FullPAD_Tunnel")
             {
-                int tmp_layer_idx = layer_cfgs[i].froms[0] > 0 ? layer_cfgs[i].froms[0] : layer_cfgs[i].froms[0] + i;
-                ch_in = layer_out_chs[tmp_layer_idx];  
+                ch_in = layer_out_chs[(layer_cfgs[i].froms[0] + i) % i];
             }
             else if(layer_cfgs[i].name == "Concat")
             {
@@ -522,48 +627,34 @@ void ModelImpl::create_modules()
 
         if(total_out_ch <= 0)   // 针对返回0的层，进行特殊处理
         {
-            // << "layer : " << i << " " << layer_cfgs[i].name << " out = 0" << std::endl;
             if(layer_cfgs[i].name == "Concat")       // 合并要将多个前面out_channel加起来算
             {
-                total_out_ch = calc_layer_outsize(i);
-                //std::cout << "Concat calc out : " << total_out_ch << std::endl;
+                for_each(layer_cfgs[i].froms.begin(), layer_cfgs[i].froms.end(), [&](int val){
+                    total_out_ch += layer_out_chs[(val + i) % i]; 
+                });
             }
             else
                 LOG(ERROR) << "layer " << i << " " << layer_cfgs[i].name << " out_channel is 0." ;
         }
+        if(b_showdebug)
+            std::cout << "ch_in: " << ch_in << " ch_out: " << total_out_ch << std::endl;
         layer_out_chs.push_back(total_out_ch);            
-        //std::cout << "Layer: " << i << " " << layer_cfgs[i].name << " channels in: " << ch_in << " out:" << layer_out_chs[i] << std::endl;
     }
     // 构造 最后一层的 Detect/Segment
-    YoloLayerDef final_layercfgs = layer_cfgs[layer_cfgs.size()-1];
+    YoloLayerDef final_layercfgs = layer_cfgs[layer_cfgs.size() - 1];
 
     std::vector<int> inchannels;
-    for(auto item : final_layercfgs.froms)
-    {
+    for (auto item : final_layercfgs.froms)
         inchannels.push_back(layer_out_chs[item]);
-        //std::cout << "Detect from: " << layer_out_chs[item] << std::endl;
-    }    
-
-    if(final_layercfgs.name == "Detect") 
+    std::cout << "n_classes: " << n_classes << " " << inchannels << std::endl;
+    if (final_layercfgs.name == "Detect")
     {
-        _modules->push_back(Detect(n_classes, inchannels));
+        _modules->push_back(Detect(n_classes, inchannels, legacy));
     }
-    /*
-    else{
-        is_segment = true;
-        std::cout << "Create segment layer: " << std::endl;
-        int nm = std::get<int>(final_layercfgs.args[2]);
-        int npr = std::get<int>(final_layercfgs.args[3]);
-            //c2 = make_divisible(float(c2) * width_multiple, 8);
-        int tmp_npr = npr;
-        std::cout << "Segment " << "in " << tmp_npr;
-        tmp_npr = make_divisible(float(tmp_npr) * width_multiple, 8);
-        std::cout << " after : " << tmp_npr << std::endl;
-        last_module = std::make_shared<SegmentImpl>(n_classes, anchors, nm, tmp_npr, inchannels, false);
-    }
-    */
+
     register_module("model", _modules);
 }
+
 
 void ModelImpl::initialize_weights()
 {
@@ -599,61 +690,35 @@ void ModelImpl::initialize_weights()
     }
 }
 
-void ModelImpl::show_modelinfo(bool show_net)
+bool ModelImpl::readModelCfgFile(std::string yaml_file)
 {
-    std::cout << ColorString("Model: ", "Info") << this->cfgfile << std::endl;
-    std::cout << "nc: " << n_classes << " ch: " << n_channels << " height: " << image_height << " widht: " << image_width << std::endl;
-    int i = 0;
-    std::for_each(layer_cfgs.begin(),layer_cfgs.end(),[&](YoloLayerDef layer){
-        std::cout << std::setw(3) << i << "  " << layer.show_info() << std::endl; i+=1;
-        });  
+    return readFileToMemory(yaml_file, cfg_buffer);
+}
 
-    std::cout << "Total layers: " << layer_cfgs.size() << std::endl;
-
-    if(show_net)
+bool ModelImpl::readCfgFromPtFile(std::string pt_file)
+{
+    torch::serialize::InputArchive domain_inputs;
+    domain_inputs.load_from(pt_file);
+    torch::Tensor read_cfgs;
+    if (domain_inputs.try_read("cfgs", read_cfgs, true))
     {
-        int layer_id = 0;
-        for(auto m : named_modules(std::string(), false))
-        {
-            std::cout << "layer_id " << layer_id << std::endl;
-            module_sub_info(*(m.value()), m.key(), 0);
-            layer_id +=1;
-        }
+        convertTensorToMemory(read_cfgs, cfg_buffer);
     }
-}
-
-int ModelImpl::calc_layer_outsize(int layer_idx)
-{
-    int total = 0;
-    for(auto from_id : layer_cfgs[layer_idx].froms)
+    else
     {
-        if(from_id < 0)
-        {
-            total += layer_out_chs[(layer_idx+from_id)];
-        }
-        else
-        {
-            total += layer_out_chs[from_id];
-        }
-    }    
-    return total;
+        LOG(ERROR) << "can't load cfgs settings from: " << pt_file;
+        return false;
+    }
+    torch::Tensor read_scale;
+    if (domain_inputs.try_read("scale", read_scale, true))
+    {
+        
+    }
+    else
+    {
+        LOG(ERROR) << "can't load scale settings from: " << pt_file;
+        return false;
+    }
+    return true;
 }
 
-void ModelImpl::set_args_prt(VariantConfigs * _args)
-{
-    if(_args == nullptr)
-        return;
-
-    p_args = _args;
-    b_showdebug = p_args->count("debug_show_info") > 0 ? std::get<bool>(p_args->at("debug_show_info")) : false;
-}
-
-std::vector<torch::Tensor> ModelImpl::get_layer_inputs(int layer_id)
-{
-    std::vector<torch::Tensor> inputs;
-    for_each(this->layer_cfgs[layer_id].froms.begin(), this->layer_cfgs[layer_id].froms.end(), [&](int from){
-        int from_layer = from > 0 ? from : layer_id + from;
-        inputs.push_back(this->layer_outputs[from_layer]);
-    });
-    return inputs;
-}

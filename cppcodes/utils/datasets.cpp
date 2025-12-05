@@ -8,8 +8,8 @@
 #include "utils.h"
 #include "general.h"
 #include "augmentations.h"
-
 #include "plots.h"
+#include "ops.h"
 
 std::vector<std::string> img_format = { ".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng", ".webp", ".mpo" }; //acceptable image suffixes
 std::vector<std::string> vid_formats = { ".mov", ".avi", ".mp4", ".mpg", ".mpeg", ".m4v", ".wmv", ".mkv" };  // acceptable video suffixes
@@ -648,6 +648,7 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 {
 	auto indices_index = indices[index];
 	auto need_mosaic = this->mosaic && random_uniform() < std::get<float>(args->at("mosaic"));
+
 	// if(index == 0)
 	// 	std::cout << "detect mosaic " << (mosaic ? "True" : "False") << ", mosaic threshold: " <<  std::get<float>(args->at("mosaic")) 
 	// 			<< ", rect: " << (rect? "True": "False") << ", need_mosaic: " << (need_mosaic ? "True" : "False") << std::endl;
@@ -712,6 +713,8 @@ CustomExample LoadImagesAndLabels::get_detect(size_t index)
 		for (int j = 0; j < labels_num; j++)
 		{
 			// 根据python原代码Yolov5-master中targets首位空为0，由后期注入labels数据对应batch
+			if(bboxs[j][0]>=80)
+				std::cout << "*************** bboxs label flag great 80************* " << bboxs[j][0] << std::endl;
 			labels[j].index_put_({ torch::indexing::Slice() }, torch::tensor(bboxs[j]));
 		}
 		auto w = ratio[0] * hw[1];
