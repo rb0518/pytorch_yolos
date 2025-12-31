@@ -8,7 +8,7 @@
 #include <typeinfo>
 #include <utility>
 
-#include "common.h"
+
 #include <experimental/optional>
 
 int autopad(int k, std::optional<int> p /*= std::nullopt*/, int d /*= 1*/)
@@ -66,7 +66,7 @@ ConvImpl::ConvImpl(int c1, int c2, int k, int s, std::optional<int> p, int g , i
 void ConvImpl::set_params(int in_channels, int number, std::vector<arg_complex>& args) 
 {
     Conf_Params defs = get_defaults();
-    make_param_from_args<Conf_Params>(defs, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(defs, args);
 
     if(args.size() < 4) // 保持 p = nullopt
         Init_Modules(in_channels, std::get<0>(defs), std::get<1>(defs), std::get<2>(defs));
@@ -506,3 +506,38 @@ torch::Tensor CBAMImpl::forward(torch::Tensor x)
     return spatial_attention->forward(channel_attention->forward(x));
 }
 // ------------------- End CBAM --------------------------
+
+/*
+* 暂时只实现最简单的定义
+*/
+
+RepConvImpl::RepConvImpl(int c1, int c2, int k, int s, int p, 
+    int g, int d, std::string act, bool bn, bool deploy)
+{
+    AT_ASSERT((k == 3 && p == 1), "k==3 && p==1");
+
+    m_g = g;
+    m_c1 = c1;
+    m_c2 = c2;
+
+    conv1 = Conv(c1, c2, k, s, p, g, d, "False");
+    conv2 = Conv(c1, c2, 1, s, p-k/2, g, d, "False");
+    register_module("conv1", conv1);
+    register_module("conv2", conv2);
+
+    if (bn && c1 == c2 && s == 1)
+    {
+        m_bn = torch::nn::BatchNorm2d(c1);
+        register_module("bn", m_bn);
+    }
+
+    active_fn = createActivation();
+    register_module("act", active_fn.ptr());
+}
+
+torch::Tensor RepConvImpl::forward(torch::Tensor x)
+{
+    if (m_bn)
+        return active_fn.forward(conv1->forward(x) + conv2->forward(x) + m_bn->forward(x));
+    return active_fn.forward(conv1->forward(x) + conv2->forward(x));
+}

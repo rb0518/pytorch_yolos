@@ -23,6 +23,9 @@
 #include "head.h"
 #include "block.h"
 
+#include "transformer.h"
+#include "BaseData.h"
+
 /*
     """
     YOLO Detect head for object detection models.
@@ -101,3 +104,74 @@ public:
     bool xyxy = false;          // xyxy or xywh ouput
 };
 TORCH_MODULE(Detect);
+
+
+
+// ----------------------- RT-DETR --------------------
+class RTDETRDecoderImpl : public torch::nn::Module
+{
+public:
+    explicit RTDETRDecoderImpl(int nc, std::vector<int> inchs,
+        int hd = 256,   // hidden dim
+        int nq = 300,   // num queries
+        int ndp = 4,
+        int nh = 8,
+        int ndl = 6,
+        int d_ffn = 1024,
+        float dropout = 0.0f,
+        int eval_idx = -1,
+        int nd = 100,
+        float label_noise_ration =0.5f,
+        float box_noise_scale = 1.f,
+        bool learnt_init_query = false
+    );
+
+    std::tuple<std::optional<torch::Tensor>,
+        std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<VariantData>> > 
+        forward(std::vector<torch::Tensor>x, VariantData batch);
+
+protected:
+    int m_nc    = 80;
+    int m_nl    = 3;
+    int m_hidden_dim    = 256;      // hidden dim
+    int m_num_queries    = 300;      // num queries
+    int m_ndp   = 4;        // num decoder points
+    int m_nhead    = 8;        // num head
+    int m_num_decoder_layers   = 6;        // num decoder layers
+    int m_d_ffn = 1024;     // dim of feedforward
+    float m_dropout = 0.0;  
+
+    int m_eval_idx = -1;
+    int m_num_denoising = 100;         
+    float m_label_noise_ratio = 0.5f;   
+    float m_box_noise_scale = 1.0f;
+    bool m_learnt_init_query = false;
+
+private:
+    void _reset_parameters();
+
+    std::tuple <torch::Tensor, std::vector<std::vector<int>>> _get_encoder_input(std::vector<torch::Tensor> x_);
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> _get_decoder_input(torch::Tensor feats,
+        std::vector<std::vector<int>> shapes, std::optional<torch::Tensor> dn_embed = std::nullopt,
+        std::optional<torch::Tensor> dn_bbox = std::nullopt);
+    std::tuple<torch::Tensor, torch::Tensor> _generate_anchors(std::vector<std::vector<int>> shapes,
+        torch::Tensor like_feats, float grid_size = 0.05f, float eps = 1e-2);
+
+protected:
+    torch::nn::ModuleList m_input_proj;
+    DeformableTransformerDecoder m_decoder{ nullptr };
+    torch::nn::Embedding m_denoising_class_embed{ nullptr };
+    torch::nn::Embedding m_tgt_embed{ nullptr };
+
+    MLP m_query_pos_head{ nullptr };
+    
+    torch::nn::Sequential m_enc_output;
+    torch::nn::Linear m_enc_score_head{ nullptr };
+    MLP m_enc_bbox_head{ nullptr };
+
+    torch::nn::ModuleList m_dec_score_head;
+    torch::nn::ModuleList m_dec_bbox_head;
+    
+    std::vector<std::vector<int>> m_shapes;
+};
+TORCH_MODULE(RTDETRDecoder);

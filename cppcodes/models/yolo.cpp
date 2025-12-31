@@ -1,15 +1,15 @@
-﻿#include <yaml-cpp/yaml.h>
+﻿#include "yolo.h"
+
+#include <yaml-cpp/yaml.h>
 #include <filesystem>
-
-#include "yolo.h"
 #include "yaml_load.h"
-#include "common.h"
-#include "utils.h"
 
+#include "utils.h"
 #include "conv.h"
 #include "block.h"
-
 #include "torch_utils.h"
+
+#include "BaseData.h"
 
 std::map<std::string, int> scales_key = {
         {"n" , 0},
@@ -83,7 +83,7 @@ int make_divisible(int x, int divisor) {
 //     return std::make_shared<T>(std::forward<Args>(args)...);
 // }
 
-#if 1
+
 #define REGISTER_LAYER_FACTORY(LAYER_NAME) \
     else if(className == #LAYER_NAME) \
     { \
@@ -107,13 +107,27 @@ int AppendLayer(torch::nn::ModuleList& modulelist,
             scale_factor(std::vector<double>({ double(scale_size), double(scale_size) }))));
         return in_channels;
     }
+    else if(className == "DWConv")
+    {
+        using Conf_Params = std::tuple<int, int, int, int, std::string>;
+        Conf_Params def_conf = std::make_tuple(0, 1, 1, 1, "True");
+        vectorvariantToTuple<Conf_Params, arg_complex>(def_conf, args);
+
+        int c2 = std::get<0>(def_conf);
+        modulelist->push_back(DWConv(in_channels, std::get<0>(def_conf),
+            std::get<1>(def_conf),
+            std::get<2>(def_conf),
+            std::get<3>(def_conf),
+            std::get<4>(def_conf)
+            ));
+        return  c2;
+    }
     REGISTER_LAYER_FACTORY(Conv)
     REGISTER_LAYER_FACTORY(C3)
     REGISTER_LAYER_FACTORY(Concat)
     REGISTER_LAYER_FACTORY(SPPF)
     REGISTER_LAYER_FACTORY(SPP)
     REGISTER_LAYER_FACTORY(Focus)
-    REGISTER_LAYER_FACTORY(Contract)
     REGISTER_LAYER_FACTORY(C3k2)
     REGISTER_LAYER_FACTORY(A2C2f)
     REGISTER_LAYER_FACTORY(C2PSA)
@@ -123,49 +137,18 @@ int AppendLayer(torch::nn::ModuleList& modulelist,
     REGISTER_LAYER_FACTORY(DownsampleConv)
     REGISTER_LAYER_FACTORY(FullPAD_Tunnel)
     REGISTER_LAYER_FACTORY(DSC3k2)
+    // 2025-12-30 add for 
+    REGISTER_LAYER_FACTORY(HGStem)
+    REGISTER_LAYER_FACTORY(HGBlock)
+    REGISTER_LAYER_FACTORY(AIFI)
+    REGISTER_LAYER_FACTORY(RepC3)
     // 所有新添加的类放在这里
     else
         throw std::invalid_argument("Unknown class name: " + className);
 
     return 0;
 }
-#endif
-#if 1
-std::shared_ptr<BaseModule> createObject(const std::string& className, 
-    int in_channels, int number, std::vector<arg_complex> args) {
-    static std::map<std::string, std::function<std::shared_ptr<BaseModule>(int, int, std::vector<arg_complex>)>> factories;
 
-    // 初始化工厂映射表（这里仅作为示例）
-    if (factories.empty()) {
-        factories["Conv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ConvImpl>(in_channels, number, args); };
-        factories["C3"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C3Impl>(in_channels, number, args); };
-        factories["Concat"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ConcatImpl>(in_channels, number, args); };
-        factories["SPPF"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<SPPFImpl>(in_channels, number, args); };
-        factories["SPP"] = [](int in_channels, int number, std::vector<arg_complex> args){ return std::make_shared<SPPImpl>(in_channels, number, args); };       
-        factories["nn.Upsample"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<nnUpsampleImpl>(in_channels, number, args); };
-        factories["Focus"] = [](int in_channels, int number, std::vector<arg_complex> args){ return std::make_shared<FocusImpl>(in_channels, number, args); };
-        factories["Contract"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ContractImpl>(in_channels, number, args); };
-//        factories["Expand"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<ExpandImpl>(in_channels, number, args); };
-        factories["C3k2"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C3k2Impl>(in_channels, number, args); };
-        factories["A2C2f"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<A2C2fImpl>(in_channels, number, args); };
-        factories["C2PSA"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<C2PSAImpl>(in_channels, number, args); };
-
-        // 2025-11-1 add for v13      
-        factories["DSConv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DSConvImpl>(in_channels, number, args); };
-        factories["HyperACE"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<HyperACEImpl>(in_channels, number, args); };
-        factories["DownsampleConv"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DownsampleConvImpl>(in_channels, number, args); };
-        factories["FullPAD_Tunnel"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<FullPAD_TunnelImpl>(in_channels, number, args); };
-        factories["DSC3k2"] = [](int in_channels, int number, std::vector<arg_complex> args) { return std::make_shared<DSC3k2Impl>(in_channels, number, args); };
-    }
-
-    auto it = factories.find(className);
-    if (it != factories.end()) {
-        return it->second(in_channels, number, args);
-    } else {
-        throw std::invalid_argument("Unknown class name: " + className);
-    }
-}
-#endif
 std::shared_ptr<DetectImpl> ModelImpl::getLastModulePtr()
 {
     if (_modules.is_empty()) return nullptr;

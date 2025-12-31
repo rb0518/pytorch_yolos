@@ -242,30 +242,6 @@ torch::Tensor box_iou(const torch::Tensor & boxes1, const torch::Tensor & boxes2
     return inter/(area1.unsqueeze(-1) + area2 - inter);
 }
 
-torch::Tensor segment2box(torch::Tensor& segment, int width, int height)
-{
-    auto x_coords = segment.select(1, 0);
-    auto y_coords = segment.select(1, 1);
-
-    auto mask_x = (x_coords >= 0) * (x_coords <= width);
-    auto mask_y = (y_coords >= 0) * (y_coords <= height); 
-    auto mask = mask_x * mask_y;
-    auto valid_x = torch::masked_select(x_coords, mask);
-    auto valid_y = torch::masked_select(y_coords, mask);
-    // 都超采样了，如果还没有足够多的点，说明大多数在有效区外，先进行面积筛选掉
-    if(valid_x.size(0) > 10 && valid_y.size(0) > 10)
-    {
-        float x_min = torch::min(valid_x).item<float>();
-        float x_max = torch::max(valid_x).item<float>();
-        float y_min = torch::min(valid_y).item<float>();
-        float y_max = torch::max(valid_y).item<float>();
-        return torch::tensor({ x_min, y_min, x_max, y_max });
-    }
-    // 压入空矩形，后面通过与原始输入targets一对一比较筛选掉这些超区域的标签
-    return torch::tensor({0,0,0,0});    
-}
-
-
 // 输入为[N][M,2] ==> [N][n=1000, 2]
 std::vector<torch::Tensor> resample_segments(std::vector<torch::Tensor>& segments, int n /*= 1000*/) 
 {

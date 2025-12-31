@@ -54,3 +54,6 @@ torch::Tensor xywhn2xyxy(const torch::Tensor& x, int w = 640, int h = 640, int p
 torch::Tensor xyxyn2xywh(const torch::Tensor& x, int w = 640, int h = 640, bool clip = false, float eps = 0.0);
 
 torch::Tensor xyn2xy(const torch::Tensor& x, int w = 640, int h = 640, int padw = 0, int padh = 0);
+
+
+torch::Tensor segment2box(torch::Tensor segment, int width, int height);

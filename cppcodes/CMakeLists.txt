@@ -38,7 +38,6 @@ endif()
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-
 # add libtorch include and libs to project
 if(WIN32)
 # 修改cmake\Caffe2\public\cuda.cmake
@@ -79,6 +78,8 @@ include_directories(
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/models"
     "${CMAKE_SOURCE_DIR}/utils"
+    "${CMAKE_SOURCE_DIR}/bases"
+    "${CMAKE_SOURCE_DIR}/src/datas"
 )
 
 file(GLOB_RECURSE add_src_files LIST_DIRECTORIES true 
@@ -87,8 +88,12 @@ file(GLOB_RECURSE add_src_files LIST_DIRECTORIES true
         "${CMAKE_SOURCE_DIR}/models/*.cpp"
         "${CMAKE_SOURCE_DIR}/models/*.h" 
         "${CMAKE_SOURCE_DIR}/utils/*.cpp"
+        "${CMAKE_SOURCE_DIR}/utils/*.cu"
         "${CMAKE_SOURCE_DIR}/utils/*.h"         
-    )  
+        "${CMAKE_SOURCE_DIR}/src/datas/*.cpp"
+        "${CMAKE_SOURCE_DIR}/src/datas/*.h" 
+        "${CMAKE_SOURCE_DIR}/bases/*.cpp"
+        "${CMAKE_SOURCE_DIR}/bases/*.h"           )  
 
 add_executable(yolos ${CMAKE_SOURCE_DIR}/main.cpp ${add_src_files})
 

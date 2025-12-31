@@ -112,6 +112,28 @@ torch::Tensor xyxy2xywhn(const torch::Tensor& x, int w /*= 640*/, int h /*= 640*
     return y;
 }
 
+torch::Tensor xyxyn2xywh(const torch::Tensor& x, int w, int h, bool clip, float eps)
+{    // 检查输入张量的最后一个维度是否为4
+    TORCH_CHECK(x.size(-1) == 4, "input shape last dimension expected 4 but input shape is ", x.sizes());
+
+    // 创建与输入相同类型的输出张量
+    auto y = torch::empty_like(x);
+
+    // 如果需要裁剪到图像边界，前期简化，暂时不用，未完善
+    if (clip) {
+        //        auto clipped_x = clip_boxes(x, {h - eps, w - eps});
+        //        x = clipped_x;
+    }
+
+    // 计算归一化中心坐标和宽高
+    y.index_put_({ "...", 0 }, ((x.index({ "...", 0 }) + x.index({ "...", 2 })) / 2) / w);  // x center
+    y.index_put_({ "...", 1 }, ((x.index({ "...", 1 }) + x.index({ "...", 3 })) / 2) / h);  // y center
+    y.index_put_({ "...", 2 }, (x.index({ "...", 2 }) - x.index({ "...", 0 })) / w);        // width
+    y.index_put_({ "...", 3 }, (x.index({ "...", 3 }) - x.index({ "...", 1 })) / h);        // height
+
+    return y;
+}
+
 torch::Tensor xyn2xy(const torch::Tensor& x, int w, int h, int padw, int padh)
 {
     TORCH_CHECK(x.size(-1) == 2, "input shape last dimension expected 2 but input shape is ", x.sizes());
@@ -122,4 +144,37 @@ torch::Tensor xyn2xy(const torch::Tensor& x, int w, int h, int padw, int padh)
     y.index_put_({"...", 1}, h * x.index({"...", 1}) + padh);  // top left y
    
     return y;
+}
+
+
+torch::Tensor segment2box(torch::Tensor segment, int width, int height)
+{
+    auto x = segment.select(1, 0);
+    auto y = segment.select(1, 1);
+    auto x_min = x.min();
+    auto y_min = y.min();
+    auto x_max = x.max();
+    auto y_max = y.max();
+
+    auto out_of_bounds = torch::tensor({ 
+        x_min.item<float>() < 0,
+        y_min.item<float>() < 0,
+        x_max.item<float>() > width,
+        y_max.item<float>() > height
+        });
+    if (out_of_bounds.sum().item<int>() >= 3)
+    {
+        x = x.clamp(0, width);
+        y = y.clamp(0, height);
+    }
+
+    auto inside_mask = (x >= 0) & (y >= 0) & (x <= width) & (y <= height);
+    x = x.masked_select(inside_mask);
+    y = y.masked_select(inside_mask);
+
+    torch::Tensor bbox = torch::tensor({ x.min().item<float>(), y.min().item<float>(),  x.max().item<float>(), y.max().item<float>() });
+    if (torch::any(x).item().toBool())
+        return bbox;
+
+    return torch::zeros({ 0, 4 }, torch::kFloat32);
 }

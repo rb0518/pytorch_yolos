@@ -3,8 +3,8 @@
     对应着新版本中nn/block.py文件中的定义
     包含如下的modules
     "DFL",                  [√]
-    "HGBlock",
-    "HGStem",
+    "HGBlock",              [√]
+    "HGStem",               [√]
     "SPP",                  [√]
     "SPPF",                 [√]
     "C1",
@@ -47,7 +47,7 @@
     "HyperACE",             [√] 
     "DownsampleConv",       [√]  
     "FullPAD_Tunnel",       [√] 
-    "DSC3k2"                
+    "DSC3k2"                [√]      
 */
 
 
@@ -55,7 +55,7 @@
 #include <torch/torch.h>
 
 #include "conv.h"
-#include "common.h"
+
 /*
     """
     Integral module of Distribution Focal Loss (DFL).
@@ -997,3 +997,119 @@ public:
     torch::nn::ModuleList m;
 };
 TORCH_MODULE(DSC3k2);
+
+class HGStemImpl : public BaseModule
+{
+public:
+    HGStemImpl(int in_channels, int number, std::vector<arg_complex>& args);
+    HGStemImpl(int c1, int cm, int c2);
+    torch::Tensor forward(torch::Tensor x);
+private:
+    void Init(int c1, int c2, int cm);
+
+private:
+    Conv stem1{ nullptr };
+    Conv stem2a{ nullptr };
+    Conv stem2b{ nullptr };
+    Conv stem3{ nullptr };
+    Conv stem4{ nullptr };
+    torch::nn::MaxPool2d pool{ nullptr };
+};
+TORCH_MODULE(HGStem);
+
+class HGBlockImpl : public BaseModule
+{
+public:
+    using Conf_Params = std::tuple<int, int, int, bool, bool, std::string>;
+    Conf_Params get_defaults()
+    {
+        return std::make_tuple(0, 0, 1, false, false, "ReLU");
+    }
+
+    HGBlockImpl(int in_channels, int number, std::vector<arg_complex>& args);
+    torch::Tensor forward(torch::Tensor x);
+private:
+    void Init(int c1, int cm, int c2, int k = 3, int n = 6, bool lightconv = false, bool shortcut = false, std::string act = "ReLU");
+
+private:
+    torch::nn::ModuleList m;
+    Conv sc{ nullptr };
+    Conv ec{ nullptr };
+    bool m_add = false;
+};
+TORCH_MODULE(HGBlock);
+
+/*
+原python 代码继承自TransformerEncoderLayer
+*/
+class AIFIImpl : public BaseModule {
+public:
+    using Conf_Params = std::tuple<int, int, float, bool>;
+    Conf_Params get_defaults()
+    {
+        return std::make_tuple(2048, 8, 0.0f, false);
+    }
+
+    AIFIImpl(int in_channels, int number, std::vector<arg_complex>& args);
+
+    torch::Tensor forward(torch::Tensor x);
+
+    torch::Tensor forward_super(torch::Tensor src,
+        std::optional<torch::Tensor> src_mask = std::nullopt,
+        std::optional<torch::Tensor> src_key_padding_mask = std::nullopt,
+        std::optional<torch::Tensor> pos = std::nullopt);
+
+private:
+    void Init(int c1, int cm = 2048, int num_heads = 8, float dropout = 0.f, bool normalize_before = false);
+
+    torch::Tensor build_2d_sincos_position_embedding(torch::Tensor x);
+
+    torch::Tensor with_pos_embed(torch::Tensor tensor, std::optional<torch::Tensor> pos = std::nullopt);
+
+    torch::Tensor forward_post(torch::Tensor src, 
+        std::optional<torch::Tensor> src_mask = std::nullopt,
+        std::optional<torch::Tensor> src_key_padding_mask = std::nullopt,
+        std::optional<torch::Tensor> pos = std::nullopt
+        );
+
+    torch::Tensor forward_pre(torch::Tensor src,
+        std::optional<torch::Tensor> src_mask = std::nullopt,
+        std::optional<torch::Tensor> src_key_padding_mask = std::nullopt,
+        std::optional<torch::Tensor> pos = std::nullopt
+    );
+
+private:
+    torch::nn::MultiheadAttention m_ma{ nullptr };
+    torch::nn::Linear m_fc1{ nullptr };
+    torch::nn::Linear m_fc2{ nullptr };
+
+    torch::nn::LayerNorm m_norm1{ nullptr };
+    torch::nn::LayerNorm m_norm2{ nullptr };
+
+    torch::nn::Dropout m_dropout{ nullptr };
+    torch::nn::Dropout m_dropout1{ nullptr };
+    torch::nn::Dropout m_dropout2{ nullptr };
+
+    torch::nn::GELU m_act{ nullptr };
+
+    bool m_normalize_before = false;
+};
+TORCH_MODULE(AIFI);
+
+class RepC3Impl : public BaseModule
+{
+public:
+    RepC3Impl(int in_channels, int number, std::vector<arg_complex>& args);
+
+    torch::Tensor forward(torch::Tensor x);
+private:
+    void Init(int c1, int c2, int n = 3, float e = 1.0f);
+
+private:
+    Conv cv1{ nullptr };
+    Conv cv2{ nullptr };
+    torch::nn::Sequential m;
+    torch::nn::AnyModule cv3;
+    //Conv cv3{ nullptr };
+};
+TORCH_MODULE(RepC3);

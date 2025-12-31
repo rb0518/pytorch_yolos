@@ -33,3 +33,7 @@ public:
 };    
 #endif
 void module_sub_info(torch::nn::Module& sub_module, const std::string key, int sub_step);
+
+torch::Tensor modulelistForward(torch::nn::ModuleList& m_list, torch::Tensor x);
+
+std::tuple<int64_t, int64_t, int64_t, int64_t> getBCHWShapes(torch::Tensor x);

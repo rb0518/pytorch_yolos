@@ -251,3 +251,20 @@ void module_sub_info(torch::nn::Module& sub_module, const std::string key, int s
             std::cout << ss.str()<<  key << " "  << sub_module.name() << std::endl;
     }
 }
+
+
+torch::Tensor modulelistForward(torch::nn::ModuleList& m_list, torch::Tensor x)
+{
+    torch::Tensor rets;
+    for (int i = 0; i < m_list->size(); i++)
+    {
+        rets = (m_list[i]->as<torch::nn::AnyModule>())->forward((i == 0 ? x : rets));
+    }
+    return rets;
+}
+
+std::tuple<int64_t, int64_t, int64_t, int64_t> getBCHWShapes(torch::Tensor x)
+{
+    AT_ASSERT(x.dim() == 4, "Tensor x is not [B, C, H, W] type");
+    return { x.size(0), x.size(1), x.size(2), x.size(3) };
+}

@@ -10,6 +10,7 @@
 
 //--------------------------- start V8DetectionLoss --------------------------
 v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<BaseModelImpl> model, torch::Device _device, int tal_topk/* = 10*/)
+    : BaseLoss()
 {
     this->device = _device;
 
@@ -23,9 +24,9 @@ v8DetectionLossImpl::v8DetectionLossImpl(std::shared_ptr<BaseModelImpl> model, t
         std::cout << ColorString("v8DetectionLossImpl", "R") << "get model::p_args is nullptr" << std::endl;
     }
 
-    dfl_ratio = hyp->count("dlf") > 0 ? std::get<float>(hyp->at("dfl")) : 1.0f;
-    box_ratio = hyp->count("box") > 0 ? std::get<float>(hyp->at("box")) : 1.0f;
-    cls_ratio = hyp->count("cls") > 0 ? std::get<float>(hyp->at("cls")) : 1.0f;
+    dfl_ratio = getVariantValue(hyp, "dfl", 1.0f);
+    box_ratio = getVariantValue(hyp, "box", 1.0f);
+    cls_ratio = getVariantValue(hyp, "cls", 1.0f);
 
     this->stride = model->get_stride();
     this->nc = model->n_classes;
@@ -103,7 +104,7 @@ save feats2: torch.Size([16, 144, 20, 20]) as preds2.pt
 save targets torch.Size([164, 6])
 */
 std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vector<torch::Tensor>& preds,
-    torch::Dict<std::string, torch::Tensor>& batch)
+    VariantData& batch)
 {
     auto loss = torch::zeros({ 3 }).to(device); // box, cls, dfl
 
@@ -111,44 +112,8 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     std::vector<torch::Tensor> views;
     int feats0_size0 = feats[0].size(0);
 
-    #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
-    // 2025-10-29 输出测试数据给pytorch代码，pytorch中用torch.jit.load读取
-    if(save_tensor_firsttime)
-    {
-        torch::save({
-                feats[0],
-                feats[1],
-                feats[2],
-                batch.at("batch_idx"),
-                batch.at("cls"),
-                batch.at("bboxes")
-            }, "c_test.pt" );
-            std::cout << "feats[0]: " << feats[0].sizes() << std::endl;
-            std::cout << "feats[1]: " << feats[1].sizes() << std::endl;
-            std::cout << "feats[2]: " << feats[2].sizes() << std::endl;
-            std::cout << "batch_idx: " << batch.at("batch_idx").sizes() << std::endl;
-            std::cout << "cls: " << batch.at("cls").sizes() << std::endl;
-            std::cout << "bboxes: " << batch.at("bboxes").sizes() << std::endl;
-        save_tensor_firsttime = false;
-    }
-    #endif
     for (int i = 0; i < feats.size(); i++)
     {
-        #ifdef _DEBUG_FOR_EXPORT_IMPORT_TENSORS_
-#if 0        
-        if(std::get<bool>(hyp->at("use_unified_batch")))
-        {
-            auto xi = load_tensordata_from_file("preds" + std::to_string(i) + ".pt");
-            if(xi.sizes() == feats[i].sizes())
-            {
-                xi = xi.to(feats[i].dtype());
-                xi = xi.to(feats[i].device());
-                feats[i].data().copy_(xi.data());
-                std::cout <<" feats{ " << i << "} copy data from file" << std::endl;
-            }
-        }
-#endif        
-        #endif
         views.push_back(feats[i].view({ feats0_size0, this->no, -1 }));
     }
 
@@ -177,9 +142,13 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     // std::cout << "stride_tensor: " << stride_tensor[0] << " " << stride_tensor[1000] << std::endl;
 
     // Targets
-    auto targets = torch::cat({ batch.at("batch_idx").view({-1, 1}),
-                                batch.at("cls").view({-1, 1}),
-                                batch.at("bboxes") }, 1);
+    torch::Tensor batch_idx = std::get<torch::Tensor>(batch[GET_VDK(VDK::BATCH_IDX)]);
+    torch::Tensor cls = std::get<torch::Tensor>(batch[GET_VDK(VDK::CLS)]);
+    torch::Tensor bboxes = std::get<torch::Tensor>(batch[GET_VDK(VDK::BBOXES)]);
+
+    auto targets = torch::cat({ batch_idx.view({-1, 1}),
+                                cls.view({-1, 1}),
+                                bboxes }, 1);
     /*
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor = imgsz [[1, 0, 1, 0]] )
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
@@ -249,5 +218,34 @@ std::tuple<torch::Tensor, torch::Tensor> v8DetectionLossImpl::forward(std::vecto
     loss[2] = loss[2] * dfl_ratio;
     return { loss.sum() * batch_size, loss.detach() };
 }
+
+void v8DetectionLossImpl::createLossRecord()
+{}
+
+std::string v8DetectionLossImpl::getLossitemsNames()
+{
+    char temp_s[120];
+    sprintf(temp_s, "%9s%7s%10s%10s%10s%10s %7s",
+        "epochs", "idx", "loss", "boxs", "cls", "dfl", "target");
+    return std::string(temp_s);
+}
+
+std::string v8DetectionLossImpl::getLossitemsInfo(int epoch, int epochs, int idx, int num_targets)
+{
+    auto lossitems = m_lossitems / std::max(1.0f, float(m_times));
+    char temp_s[120];
+    sprintf(temp_s, "%4d-%-4d%7d%10.5f%10.5f%10.5f%10.5f %6d",
+        epoch+1, epochs, idx,
+        m_loss.item<float>(),
+        lossitems[0].item().toFloat(),
+        lossitems[1].item().toFloat(),
+        lossitems[2].item().toFloat(),
+        num_targets
+    );
+
+    return std::string(temp_s);
+}
+
+
 //--------------------------- end V8DetectionLoss --------------------------
 

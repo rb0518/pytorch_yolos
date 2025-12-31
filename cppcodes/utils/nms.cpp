@@ -4,190 +4,6 @@
 #include "ops.h"
 #include "utils.h"
 
-/*
-    python 原代码函数注释内容
-    """Runs Non-Maximum Suppression (NMS) on inference results
-
-    Returns:
-         list of detections, on (n,6) tensor per image [xyxy, conf, cls]
-    """
-*/
-std::vector<torch::Tensor> non_max_suppression(
-    torch::Tensor prediction,
-    float conf_thres,
-    float iou_thres,
-    const std::vector<std::vector<int>>& classes,
-    bool agnostic,
-    bool multi_label,
-    const std::vector<std::vector<float>>& labels,
-    int max_det /*= 300*/,
-    int nm /*= 0*/  // number of masks
-) 
-{
-    int bs = prediction.size(0);        // batch size
-    int nc = prediction.size(2) - nm - 5;  // number of classes
-    auto xc = prediction.index({"...", 4}) > conf_thres; // candidates
-    //std::cout << "input: " << prediction.sizes() << " " << xc.sizes() << std::endl;
-
-    // 参数初始化
-    //constexpr int min_wh = 2;
-    constexpr int max_wh = 7680;    // 10-9 4096==>7680
-    constexpr int max_nms = 30000;
-    constexpr float time_limit = 30.0;
-    bool redundant = true;
-    bool merge = false;
-
-    multi_label &= (nc > 1);
-
-    auto t = std::chrono::steady_clock::now();
-
-    int mi = 5 + nc;    // mask start index
-
-    std::vector<torch::Tensor> output;
-    // auto output = std::vector<torch::Tensor>(prediction.size(0), torch::zeros({ 0, 6 }, prediction.options()));
-
-    // 主处理循环
-    for (int xi = 0; xi < prediction.size(0); ++xi) 
-    {
-        auto x = prediction[xi];
-//        std::cout << xc[xi].sizes() << xc[xi].sum().item().toInt() << std::endl;
-
-        // 应用置信度筛选
-        x = x.index({ xc[xi] });
-        //std::cout << xi << " x " << x.sizes() << std::endl;
-        // ???添加先验标签，先不处理
-        /*
-        if (labels.size() > 0 && labels[xi].size() > 0) {
-            auto l = torch::from_blob(labels[xi].data(), { labels[xi].size(), 5 }, torch::kFloat32);
-            auto v = torch::zeros({ l.size(0), x.size(1) }, x.options());
-            v.index({ torch::indexing::Slice(), torch::indexing::Slice(0, 4) }) = l.index({ torch::indexing::Slice(), torch::indexing::Slice(1, 5) });
-            v.index({ torch::indexing::Slice(), 4 }) = 1.0;
-            v.index({ torch::indexing::Slice(0, l.size(0)), torch::indexing::Slice(5, x.size(1)) }) = l.index({ torch::indexing::Slice(), torch::indexing::Slice(0, x.size(1) - 5) });
-            x = torch::cat({ x, v }, 0);
-        }
-        */
-        // 如果无剩余框则跳过
-        if (x.size(0) == 0)
-        {
-//            std::cout << xi << " after x[xc[xi]] return 0 " << std::endl;
-            output.push_back(torch::zeros({0, 6 + nm}));
-            continue;
-        }
-
-        // 计算最终置信度
-        x.index_put_(
-            { torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None)},
-            x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, torch::indexing::None)}) * x.index({ torch::indexing::Slice(), torch::indexing::Slice(4, 5)})
-            );
-
-        // 坐标转换
-        auto box = xywh2xyxy(x.index({ torch::indexing::Slice(), torch::indexing::Slice(0, 4) }));
-        // zero columns if no masks
-        auto mask = x.index({torch::indexing::Slice(), torch::indexing::Slice(mi, torch::indexing::None)});
-        // std::cout << "box " << box.sizes() << "multi_label: " << multi_label <<" mask: " << mask.sizes() << std::endl;
-
-        // 多标签处理
-        if (multi_label) {
-            auto ijcls = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, mi) }) > conf_thres;
-            auto ijcls_t = ijcls.nonzero().t();
-            auto i = ijcls_t[0];
-            auto j = ijcls_t[1];
-            auto box_i = box.index({ i });
-            auto x_ij = x.index({i, j+5}).unsqueeze(-1);
-            auto mask_i = mask.index({i});
-            std::cout << "box_i: " << box_i.sizes() << " mask_i " << mask_i.sizes() << std::endl;
-            x = torch::cat({ box_i, x_ij, j.unsqueeze(-1).to(torch::kFloat), mask_i}, 1);
-        }
-        else {
-            auto [conf, j] = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, mi) }).max(1, true);
-            auto x_filtered = torch::cat({ box, conf, j.to(torch::kFloat), mask}, 1);
-            auto conf_sel = conf > conf_thres;
-//            std::cout << "x_filtered: " << x_filtered.sizes() << " conf " << conf_sel.sizes() << std::endl;
-            x = x_filtered.index({conf_sel.squeeze(1)});
-        }
-
-        // 按类别筛选
-        // if (!classes.empty()) {
-        //     auto mask = torch::zeros({ x.size(0), 1 }, x.options());
-        //     for (auto cls : classes[xi]) {
-        //         mask |= (x.index({ torch::indexing::Slice(), 5 }) == cls).view(-1, 1);
-        //     }
-        //     x = x[mask];
-        // }
-        if(x.size(0) ==  0)
-        {
-//            std::cout << " no boxes " << std::endl;
-            output.push_back(torch::zeros({0, 6 + nm}));
-            continue;
-        }
-
-        // 应用限制条件
-        if (x.size(0) > max_nms) {
-            x = x[x.index({ torch::indexing::Slice(), 4 }).argsort(0, true).slice(0, max_nms)];
-        }
-//        std::cout << "before nms x " << x.sizes() << std::endl;
-        // batched nms
-        auto x_cpu = x.cpu();
-
-        // Batched NMS
-        auto c = x.index({torch::indexing::Slice(), 5});
-        if(agnostic)
-            c = c * 0;
-        else 
-            c = c * max_wh;
-        
-        auto boxes = x.index({torch::indexing::Slice(), torch::indexing::Slice(0, 4)}) + c.unsqueeze(1);
-        auto scores = x.index({torch::indexing::Slice(), 4});
-
-        std::vector<cv::Rect> cv_boxes;
-        std::vector<float> cv_scores;
-        for(int i = 0; i < x.size(0); i++)
-        {
-            auto x1 = boxes[i][0].item().toDouble();
-            auto y1 = boxes[i][1].item().toDouble();
-            auto x2 = boxes[i][2].item().toDouble();
-            auto y2 = boxes[i][3].item().toDouble();
-
-            cv_boxes.push_back(cv::Rect(cv::Point2d(x1, y1), cv::Point2d(x2, y2)));
-            cv_scores.push_back(scores[i].item().toFloat());
-        }
-
-        // run cv::dnn::NMSBoxes
-        std::vector<int> nms_indices;
-#if 0
-        std::vector<float> updated_scores;
-        cv::dnn::softNMSBoxes(cv_boxes, cv_scores, updated_scores, conf_thres, iou_thres, nms_indices);
-#else
-        cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres, iou_thres, nms_indices);
-#endif        
-//        std::cout << "After cv::dnn::NMSBoxes: " << nms_indices.size() << std::endl;
-
-        // 构造返回函数，压入vector
-        int box_count = nms_indices.size();
-        if (nms_indices.size() > 0)
-        {
-            auto box_sel = torch::tensor(nms_indices);
-            auto ret_box = x_cpu.index({box_sel});
-            output.push_back(ret_box);
-
-            std::cout << xi << " return " << ret_box.sizes() << std::endl;
-        }
-        else
-        {
-            output.push_back(torch::zeros({0, 6 + nm}));
-        }
- 
-        // 检查时间限制
-        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t).count() > time_limit) {
-            std::cout << "WARNING: NMS time limit " << time_limit << "s exceeded" << std::endl;
-            break;
-        }
-    }
-
-    return output;
-}
-
-namespace ops {
 std::vector<torch::Tensor> non_max_suppression(
     torch::Tensor prediction,
     float conf_thres/* = 0.25f*/,
@@ -204,8 +20,6 @@ std::vector<torch::Tensor> non_max_suppression(
     bool in_place/* = true*/,
     bool rotated /*= false*/)
 {
-    std::cout << "non_max_suppressio start, input: " << prediction.sizes() << std::endl;
-
     if (prediction.size(-1) == 6)
     {
         std::cout << "prediction size(-1) == 6, it's end2ent model i.e. [1,300, 6] \n";
@@ -219,11 +33,10 @@ std::vector<torch::Tensor> non_max_suppression(
     int mi = 4 + nc;    // mask start index
 
     auto xc = prediction.index({ torch::indexing::Slice(), torch::indexing::Slice(4, mi) }).amax(1) > conf_thres; // condidates
-    std::cout << "xc " << xc.sizes() << std::endl;      // [bs, 8400]
+ 
     float time_limit = 2.0 + max_time_img * bs; // seconds to quit after
     multi_label &= nc > 1;
     prediction = prediction.transpose(-1, -2);
-    std::cout << "pred transpose: " << prediction.sizes() << "\n";
 
     if(!rotated)
     { 
@@ -231,7 +44,6 @@ std::vector<torch::Tensor> non_max_suppression(
         {
             auto pred_bbox_xyxy = xywh2xyxy(prediction.index(
                 { "...", torch::indexing::Slice(0, 4) }));
-            std::cout << "in_place pred_bbox_xyxy: " << pred_bbox_xyxy.sizes() << std::endl;
             prediction.index_put_({ "...", torch::indexing::Slice(0,4)},
                 pred_bbox_xyxy);
         }
@@ -250,13 +62,12 @@ std::vector<torch::Tensor> non_max_suppression(
         output.emplace_back(torch::zeros({ 0, 6 + nm },
             torch::TensorOptions().device(prediction.device())));
 
-    for (size_t xi = 0; xi < prediction.size(0); ++xi)
+    for (size_t xi = 0; xi < prediction.size(0); xi++)
     {
         torch::Tensor x = prediction[xi];
         x = x.index({ xc[xi] });
         if (x.size(0) == 0)
         {
-            std::cout << xi << " after x[xc[xi]] return 0 " << std::endl;
             continue;
         }
 
@@ -264,14 +75,13 @@ std::vector<torch::Tensor> non_max_suppression(
         torch::Tensor box = xyxy_cls_mask[0];
         torch::Tensor cls = xyxy_cls_mask[1];
         torch::Tensor mask = xyxy_cls_mask[2];
-        std::cout << "cls " << cls.sizes() << " box " << box.sizes()
-            << " mask " << mask.sizes() << std::endl;
+
         if (multi_label)
         {
             auto cls_where = torch::where(cls > conf_thres);
             torch::Tensor i = cls_where[0];
             torch::Tensor j = cls_where[1];
-            std::cout << "i " << i.sizes() << " j " << j.sizes() << std::endl;
+
             auto box_i = box.index({ i });
             auto x_ij = x.index({ i, 4 + j, torch::indexing::None });
             auto mask_i = mask.index({ i });
@@ -294,7 +104,9 @@ std::vector<torch::Tensor> non_max_suppression(
         }
 
         int n = x.size(0);   // number of boxes
-        std::cout << "number of boxes: " << n << std::endl;
+
+        if (n < 1)
+            continue;
 
         if (n > max_nms) 
         { 
@@ -311,6 +123,17 @@ std::vector<torch::Tensor> non_max_suppression(
         else
             c = x.index({ torch::indexing::Slice(), torch::indexing::Slice(5, 6) }) * max_wh;
         auto scores = x.index({ torch::indexing::Slice(), 4 });
+
+#if 1
+        auto boxes = x.index({ torch::indexing::Slice(), torch::indexing::Slice(
+            0, 4) }).add(c);
+        
+        auto nms_indices = vision::ops::nms(boxes, scores, iou_thres);
+        nms_indices = nms_indices.index({torch::indexing::Slice(0, max_det)});
+
+        output[xi] = x.index({ nms_indices }).clone();
+
+#else
         std::vector<int> nms_indices;
         if (rotated)
         {
@@ -321,7 +144,7 @@ std::vector<torch::Tensor> non_max_suppression(
         {
             auto boxes = x.index({ torch::indexing::Slice(), torch::indexing::Slice(
                 0, 4) }).add(c);
-
+            
             std::vector<cv::Rect> cv_boxes;
             std::vector<float> cv_scores;
             for (int i = 0; i < boxes.size(0); i++)
@@ -336,20 +159,140 @@ std::vector<torch::Tensor> non_max_suppression(
             }
 
             // run cv::dnn::NMSBoxes
-#if 0
+#if 1
             std::vector<float> updated_scores;
             cv::dnn::softNMSBoxes(cv_boxes, cv_scores, updated_scores, conf_thres, iou_thres, nms_indices);
 #else
             cv::dnn::NMSBoxes(cv_boxes, cv_scores, conf_thres, iou_thres, nms_indices);
 #endif   
-            if (nms_indices.size() > max_det) {
-                nms_indices.resize(max_det);
-            }
+        }
+        if (nms_indices.size() > max_det) {
+            nms_indices.resize(max_det);
         }
         output[xi] = x.index({ torch::tensor(nms_indices) });
+#endif        
     }
 
     return output;
 }
 
-}   // end namespace ops
+namespace vision{
+namespace ops{
+
+at::Tensor nms_kernel_cpu(
+    const at::Tensor& dets,
+    const at::Tensor& scores,
+    double iou_threshold) 
+{
+    TORCH_CHECK(dets.is_cpu(), "dets must be a CPU tensor");
+    TORCH_CHECK(scores.is_cpu(), "scores must be a CPU tensor");
+    TORCH_CHECK(
+        dets.scalar_type() == scores.scalar_type(),
+        "dets should have the same type as scores");
+    
+    std::cout << "dets.numel: " << dets.numel() << std::endl;
+    if (dets.numel() == 0) {
+        return at::empty({ 0 }, dets.options().dtype(at::kLong));
+    }
+
+    auto x1_t = dets.select(1, 0).contiguous();
+    auto y1_t = dets.select(1, 1).contiguous();
+    auto x2_t = dets.select(1, 2).contiguous();
+    auto y2_t = dets.select(1, 3).contiguous();
+
+    at::Tensor areas_t = (x2_t - x1_t) * (y2_t - y1_t);
+
+    auto order_t = std::get<1>(
+        scores.sort(/*stable=*/true, /*dim=*/0, /* descending=*/true));
+
+    auto ndets = dets.size(0);
+    at::Tensor suppressed_t = at::zeros({ ndets }, dets.options().dtype(at::kByte));
+    at::Tensor keep_t = at::zeros({ ndets }, dets.options().dtype(at::kLong));
+    auto scalar_t = dets.scalar_type();
+    auto suppressed = suppressed_t.data_ptr<uint8_t>();
+    auto keep = keep_t.data_ptr<int64_t>();
+    auto order = order_t.data_ptr<int64_t>();
+    auto x1 = x1_t.data_ptr<float>();
+    auto y1 = y1_t.data_ptr<float>();
+    auto x2 = x2_t.data_ptr<float>();
+    auto y2 = y2_t.data_ptr<float>();
+    auto areas = areas_t.data_ptr<float>();
+
+    int64_t num_to_keep = 0;
+
+    for (int64_t _i = 0; _i < ndets; _i++) {
+        auto i = order[_i];
+        if (suppressed[i] == 1) {
+            continue;
+        }
+        keep[num_to_keep++] = i;
+        auto ix1 = x1[i];
+        auto iy1 = y1[i];
+        auto ix2 = x2[i];
+        auto iy2 = y2[i];
+        auto iarea = areas[i];
+
+        for (int64_t _j = _i + 1; _j < ndets; _j++) {
+            auto j = order[_j];
+            if (suppressed[j] == 1) {
+                continue;
+            }
+            auto xx1 = std::max(ix1, x1[j]);
+            auto yy1 = std::max(iy1, y1[j]);
+            auto xx2 = std::min(ix2, x2[j]);
+            auto yy2 = std::min(iy2, y2[j]);
+
+            auto w = std::max(0.f, xx2 - xx1);
+            auto h = std::max(0.f, yy2 - yy1);
+            auto inter = w * h;
+            auto ovr = inter / (iarea + areas[j] - inter);
+            if (ovr > iou_threshold) {
+                suppressed[j] = 1;
+            }
+        }
+    }
+    return keep_t.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep);
+}
+
+   
+torch::Tensor nms(
+    const torch::Tensor& dets,
+    const torch::Tensor& scores,
+    double iou_threshold)
+{
+    TORCH_CHECK(
+        dets.dim() == 2, "boxes should be a 2d tensor, got ", dets.dim(), "D");
+    TORCH_CHECK(
+        dets.size(1) == 4,
+        "boxes should have 4 elements in dimension 1, got ",
+        dets.size(1));
+    TORCH_CHECK(
+        scores.dim() == 1,
+        "scores should be a 1d tensor, got ",
+        scores.dim(),
+        "D");
+    TORCH_CHECK(
+        dets.size(0) == scores.size(0),
+        "boxes and scores should have same number of elements in ",
+        "dimension 0, got ",
+        dets.size(0),
+        " and ",
+        scores.size(0));
+    
+    auto result = at::empty({ 0 }, dets.options());
+
+    if (dets.is_cuda())
+    {
+        result = nms_kernel_cuda(dets, scores, iou_threshold);
+    }
+    else
+    {
+        result = nms_kernel_cpu(dets, scores, iou_threshold);
+    }
+
+    return result;
+}
+
+}   //namespace ops
+}   //namespace vision
+

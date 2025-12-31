@@ -11,6 +11,9 @@
 */
 #include "head.h"
 #include "tal.h"
+
+#include "BaseData.h"
+#include "BaseLoss.h"
 /*
     """
     Return sum of left and right DFL losses.
@@ -97,12 +100,17 @@ public:
 };
 TORCH_MODULE(BboxLoss);
 
-class v8DetectionLossImpl
+class v8DetectionLossImpl : public BaseLoss
 {
 public:
     v8DetectionLossImpl(std::shared_ptr<BaseModelImpl> model, torch::Device _device, int tal_topk = 10);
-    std::tuple<torch::Tensor, torch::Tensor> forward(std::vector<torch::Tensor>& preds,
-         torch::Dict<std::string, torch::Tensor>& batch);
+
+    virtual std::tuple<torch::Tensor, torch::Tensor> forward(std::vector<torch::Tensor>& preds,
+         VariantData& batch) override;
+
+    void createLossRecord() override;
+    std::string getLossitemsNames() override;
+    std::string getLossitemsInfo(int epoch, int epochs, int idx, int num_targets) override;
 public:
     torch::Device device = torch::Device(torch::kCPU);
     torch::nn::BCEWithLogitsLoss bce{ nullptr };

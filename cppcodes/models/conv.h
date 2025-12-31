@@ -14,7 +14,7 @@
     "SpatialAttention",     [√]
     "CBAM",                 [√]
     "Concat",               [√]
-    "RepConv",                      暂时只有rtdetr.yaml中RepC3和RepBottleneck会用到
+    "RepConv",              [√]        暂时只有rtdetr.yaml中RepC3和RepBottleneck会用到
     "Index"
     "DSConv"                [√]
 */
@@ -342,3 +342,24 @@ public:
     torch::nn::SiLU act{nullptr};
 };
 TORCH_MODULE(DSConv);
+
+class RepConvImpl : public torch::nn::Module
+{
+public:
+    RepConvImpl(int c1, int c2, int k = 3,
+        int s = 1, int p = 1, int g = 1, int d = 1,
+        std::string act = "True",
+        bool bn = false,
+        bool deploy = false);
+    torch::Tensor forward(torch::Tensor x);
+private:
+    torch::nn::AnyModule active_fn;
+    Conv conv1{ nullptr };
+    Conv conv2{ nullptr };
+    torch::nn::BatchNorm2d m_bn{ nullptr };
+
+    int m_g = 1;
+    int m_c1;
+    int m_c2;
+};
+TORCH_MODULE(RepConv);

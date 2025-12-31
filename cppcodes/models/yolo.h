@@ -4,13 +4,11 @@
 #include <vector>
 #include <deque>
 #include <tuple>
-#include "BaseModel.h"
-#include "yaml_load.h"
 
-#include "common.h"
-#include "conv.h"
-#include "block.h"
+#include "BaseModel.h"
 #include "head.h"
+
+#include "globaldef.h"
 
 
 class ModelImpl : public BaseModelImpl
@@ -37,9 +35,7 @@ protected:
 
 public:
     bool b_showdebug = false;                   //控制调试信息的显示 
-
     float gr = 1.0f;
-
     bool is_segment = false;
 
     std::vector<std::vector<float>> anchors;
@@ -65,7 +61,7 @@ public:
     std::shared_ptr<DetectImpl> getLastModulePtr();
 
 protected:
-    // 这两个函数如果后续需要，可以变更为艾基类函数或虚函数
+    // 这两个函数如果后续需要，可以变更为基类函数或虚函数
     bool readModelCfgFile(std::string yaml_file);
     bool readCfgFromPtFile(std::string pt_file);
 

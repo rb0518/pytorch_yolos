@@ -1,5 +1,4 @@
 ﻿#include "block.h"
-#include "common.h"
 
 #include "vectorTotuple.h"
 
@@ -98,7 +97,7 @@ torch::Tensor SPPImpl::forward(torch::Tensor x)
 SPPFImpl::SPPFImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     auto params = get_defaults();
-    make_param_from_args<Conf_Params>(params, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(params, args);
     Init_Modules(in_channels, std::get<0>(params), std::get<1>(params));
 }
 
@@ -131,7 +130,7 @@ torch::Tensor SPPFImpl::forward(torch::Tensor x)
 C2fImpl::C2fImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     auto params = get_defaults();
-    make_param_from_args<Conf_Params>(params, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(params, args);
     C2fImpl(in_channels, std::get<0>(params), number, std::get<1>(params),
         std::get<2>(params), std::get<3>(params));
 }
@@ -180,7 +179,7 @@ torch::Tensor C2fImpl::forward_split(torch::Tensor x)
 C3k2Impl::C3k2Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     auto params = get_defaults();
-    make_param_from_args<Conf_Params>(params, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(params, args);
     Init(in_channels, std::get<0>(params), number,
         std::get<1>(params), std::get<2>(params), std::get<3>(params), std::get<4>(params));
 }
@@ -265,7 +264,7 @@ C3kImpl::C3kImpl(int c1, int c2, int n, bool shortcut, int g, float e, int k_)
 C3Impl::C3Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     auto params = get_defaults();
-    make_param_from_args(params, args);
+    vectorvariantToTuple(params, args);
     C3Impl(in_channels, std::get<0>(params), number, std::get<1>(params),
             std::get<2>(params), std::get<3>(params));
 }
@@ -386,7 +385,7 @@ void A2C2fImpl::set_params(int in_channels, int number, std::vector<arg_complex>
 {
     // [-1, 4, A2C2f, [512, True, 4/1/-1]] ==> c2 = 512,  n = 4,  a2 = True, area = 4/1/-1
     auto defs = get_defaults();
-    make_param_from_args<Conf_Params>(defs, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(defs, args);
 
     Init_Modules(in_channels, std::get<0>(defs), number, std::get<1>(defs),
         std::get<2>(defs), std::get<3>(defs), std::get<4>(defs), std::get<5>(defs),
@@ -524,7 +523,7 @@ torch::Tensor C2PSAImpl::forward(torch::Tensor x)
 HyperACEImpl::HyperACEImpl(int in_channels, int number, std::vector<arg_complex>& args)
 {
     auto params = get_defaults();
-    make_param_from_args<Conf_Params>(params, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(params, args);
 
     Init(in_channels, std::get<0>(params), number,
         std::get<1>(params),
@@ -637,7 +636,7 @@ void DownsampleConvImpl::Init(int in_channels, bool channel_adjust)
 
 DSC3k2Impl::DSC3k2Impl(int in_channels, int number, std::vector<arg_complex>& args)
 {
-    make_param_from_args<Conf_Params>(def_params, args);
+    vectorvariantToTuple<Conf_Params, arg_complex>(def_params, args);
     Init(in_channels, std::get<0>(def_params), number, std::get<1>(def_params), 
             std::get<2>(def_params), std::get<3>(def_params),
             std::get<4>(def_params), std::get<5>(def_params),
@@ -827,7 +826,6 @@ torch::Tensor _no_grad_trunc_normal_(torch::Tensor tensor, float mean, float std
         return (1.0f + std::erff(x / std::sqrt(2.0f))) / 2.0f;
         };
 
-    torch::NoGradGuard nograd;
     auto l = norm_cdf((a - mean) / std);
     auto u = norm_cdf((b - mean) / std);
 
@@ -1217,3 +1215,265 @@ void FullPAD_TunnelImpl::Init(int in_channels)
     this->gate = register_parameter("gate", torch::tensor(0.0));
 }
 //-------------------------------- End FullPAD_TunnelImpl -----------------------------
+
+//-------------------------------- Start HGStemImpl -----------------------------
+
+HGStemImpl::HGStemImpl(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    // args中数据顺序 [cm, c2]
+    Init(in_channels, std::get<int>(args[1]), std::get<int>(args[0]));
+}
+
+HGStemImpl::HGStemImpl(int c1, int cm, int c2)
+{
+    Init(c1, c2, cm);
+}
+
+torch::Tensor HGStemImpl::forward(torch::Tensor x)
+{
+    x = stem1->forward(x);
+    auto pad_op = torch::nn::functional::PadFuncOptions({ 0, 1, 0, 1 });
+    x = torch::nn::functional::pad(x, pad_op);
+    auto x2 = stem2a->forward(x);
+    x2 = torch::nn::functional::pad(x2, pad_op);
+    x2 = stem2b->forward(x2);
+    auto x1 = pool->forward(x);
+    x = torch::cat({ x1, x2 }, 1);
+    x = stem3->forward(x);
+    x = stem4->forward(x);
+    return x;
+}
+
+void HGStemImpl::Init(int c1, int c2, int cm)
+{
+    _out_channels = c2;
+
+    stem1 = Conv(c1, cm, 3, 2, std::nullopt, 1, 1, "ReLU");
+    stem2a = Conv(cm, cm / 2, 2, 1, 0, 1, 1, "ReLU");
+    stem2b = Conv(cm / 2, cm, 2, 1, 0, 1, 1, "ReLU");
+    stem3 = Conv(cm * 2, cm, 3, 2, std::nullopt, 1, 1, "ReLU");
+    stem4 = Conv(cm, c2, 1, 1, std::nullopt, 1, 1, "ReLU");
+    auto op = torch::nn::MaxPool2dOptions(2).stride(1).padding(0).ceil_mode(false);
+    pool = torch::nn::MaxPool2d(op);
+
+    register_module("stem1", stem1);
+    register_module("stem2a", stem2a);
+    register_module("stem2b", stem2b);
+    register_module("stem3", stem3);
+    register_module("stem4", stem4);
+    register_module("pool", pool);
+}
+
+//-------------------------------- End HGStemImpl -----------------------------
+
+//-------------------------------- Start HGBlockImpl -----------------------------
+
+HGBlockImpl::HGBlockImpl(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    Conf_Params def_params = get_defaults();
+    vectorvariantToTuple<Conf_Params, arg_complex>(def_params, args);
+    Init(in_channels, std::get<0>(def_params), std::get<1>(def_params),
+        std::get<2>(def_params), number,
+        std::get<3>(def_params),
+        std::get<4>(def_params), std::get<5>(def_params));
+}
+
+torch::Tensor HGBlockImpl::forward(torch::Tensor x)
+{
+    std::vector<torch::Tensor> vc_y = { x };
+    for (int i = 0; i < m->size(); i++)
+        vc_y.push_back(m[i]->as<torch::nn::AnyModule>()->forward(vc_y.back()));
+
+    auto y = ec->forward(sc->forward(torch::cat(vc_y, 1)));
+    if (m_add)
+        return y + x;
+    return y;
+}
+
+void HGBlockImpl::Init(int c1, int cm, int c2, int k, int n, bool lightconv, bool shortcut, std::string act)
+{
+    _out_channels = c2;
+    if (lightconv)
+    {
+        for (int i = 0; i < n; i++)
+            m->push_back(LightConv((i==0? c1 : cm), cm, k, act));
+    }
+    else
+    {
+        for (int i = 0; i < n; i++)
+            m->push_back(Conv((i == 0 ? c1 : cm), cm, k, 1, std::nullopt, 1, 1, act));
+    }
+
+    sc = Conv(c1 + n * cm, c2 / 2, 1, 1, std::nullopt, 1, 1, act);
+    ec = Conv(c2 / 2, c2, 1, 1, std::nullopt, 1, 1, act);
+    register_module("m", m);
+    register_module("sc", sc);
+    register_module("ec", ec);
+    m_add = shortcut && c1 == c2;
+}
+
+//-------------------------------- End HGBlockImpl -----------------------------
+
+//-------------------------------- Start AIFIImpl -----------------------------
+
+AIFIImpl::AIFIImpl(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    Conf_Params def_params = get_defaults();
+    vectorvariantToTuple<Conf_Params, arg_complex>(def_params, args);
+    
+    Init(in_channels, std::get<0>(def_params), std::get<1>(def_params),
+        std::get<2>(def_params), std::get<3>(def_params));
+}
+
+torch::Tensor AIFIImpl::forward(torch::Tensor x)
+{
+    int c = x.size(1);
+    int h = x.size(2);
+    int w = x.size(3);
+    auto pos_embed = build_2d_sincos_position_embedding(x);
+
+    auto rets = forward_super(x.flatten(2).permute({ 0, 2, 1 }), std::nullopt, std::nullopt, pos_embed);
+    return rets.permute({ 0, 2, 1 }).view({ -1,  c, h, w }).contiguous();
+}
+
+torch::Tensor AIFIImpl::forward_super(torch::Tensor src, std::optional<torch::Tensor> src_mask, 
+    std::optional<torch::Tensor> src_key_padding_mask, std::optional<torch::Tensor> pos)
+{
+    if (m_normalize_before)
+        return forward_pre(src, src_mask, src_key_padding_mask, pos);
+    return forward_post(src, src_mask, src_key_padding_mask, pos);
+}
+
+torch::Tensor AIFIImpl::build_2d_sincos_position_embedding(torch::Tensor x)
+{
+    int c = x.size(1);
+    int h = x.size(2);
+    int w = x.size(3);
+    float temperature = 10000.f;
+
+    auto grid_w = torch::arange(w, torch::kFloat32);
+    auto grid_h = torch::arange(h, torch::kFloat32);
+    auto grid_wh = torch::meshgrid({ grid_w, grid_h }, "ij");
+    grid_w = grid_wh[0];
+    grid_h = grid_wh[1];
+
+    auto pos_dim = c / 4;
+    auto omega = torch::arange(pos_dim, torch::kFloat32) / pos_dim;
+    omega = 1.0f / torch::pow(temperature, omega);
+
+    auto out_w = torch::matmul(grid_w.flatten().unsqueeze(-1), omega.unsqueeze(0));
+    auto out_h = torch::matmul(grid_h.flatten().unsqueeze(-1), omega.unsqueeze(0));
+
+    auto rets = torch::cat({ torch::sin(out_w), torch::cos(out_w),
+        torch::sin(out_h), torch::cos(out_h) }, 1).unsqueeze(0);
+    rets = rets.to(x.dtype()).to(x.device());
+    return rets;
+}
+
+torch::Tensor AIFIImpl::with_pos_embed(torch::Tensor tensor, std::optional<torch::Tensor> pos)
+{
+    if (pos.has_value())
+        return tensor + pos.value();
+    return tensor;
+}
+
+torch::Tensor AIFIImpl::forward_post(torch::Tensor src, std::optional<torch::Tensor> src_mask, std::optional<torch::Tensor> src_key_padding_mask, std::optional<torch::Tensor> pos)
+{
+    torch::Tensor q = with_pos_embed(src, pos);
+    torch::Tensor k = q;
+
+    auto src2 = std::get<0>(m_ma->forward(q, k, src,
+        src_key_padding_mask.value_or(torch::Tensor()),
+        true,
+        src_mask.value_or(torch::Tensor()),
+        true));
+    src = src + m_dropout1->forward(src2);
+    src = m_norm1->forward(src);
+    src2 = m_fc2->forward(m_dropout->forward(m_act->forward(m_fc1->forward(src))));
+    src = src + m_dropout2->forward(src2);
+    return m_norm2->forward(src);
+}
+
+torch::Tensor AIFIImpl::forward_pre(torch::Tensor src, std::optional<torch::Tensor> src_mask, std::optional<torch::Tensor> src_key_padding_mask, std::optional<torch::Tensor> pos)
+{
+    auto src2 = m_norm1->forward(src);
+    auto q = with_pos_embed(src2, pos);
+    auto k = q;
+    src2 = std::get<0>(m_ma->forward(q, k, src2, 
+        src_key_padding_mask.value_or(torch::Tensor()),
+        true,
+        src_mask.value_or(torch::Tensor()),
+        true));
+    src = src + m_dropout1->forward(src2);
+    src2 = m_norm2->forward(src);
+    src2 = m_fc2->forward(m_dropout->forward(m_act->forward(m_fc1->forward(src2))));
+    return src + m_dropout2->forward(src2);
+}
+
+void AIFIImpl::Init(int c1, int cm, int num_heads, float dropout, bool normalize_before)
+{
+    auto ma_ops = torch::nn::MultiheadAttentionOptions(c1, num_heads).dropout(dropout)/*.batch_first(true)*/;   // libtorch C++中没有batch_first args defined.
+    m_ma = torch::nn::MultiheadAttention(ma_ops);
+
+    m_fc1 = torch::nn::Linear(c1, cm);
+    m_fc2 = torch::nn::Linear(cm, c1);
+
+    m_norm1 = torch::nn::LayerNorm(torch::nn::LayerNormOptions({int64_t(c1)}));
+    m_norm2 = torch::nn::LayerNorm(torch::nn::LayerNormOptions({int64_t(c1)}));
+
+    m_dropout = torch::nn::Dropout(dropout);
+    m_dropout1 = torch::nn::Dropout(dropout);
+    m_dropout2 = torch::nn::Dropout(dropout);
+
+    m_act = torch::nn::GELU();
+
+    register_module("ma", m_ma);
+    register_module("fc1", m_fc1);
+    register_module("fc2", m_fc2);
+
+    register_module("norm1", m_norm1);
+    register_module("norm2", m_norm2);
+
+    register_module("dropout", m_dropout);
+    register_module("dropout1", m_dropout1);
+    register_module("dropout2", m_dropout2);
+
+    register_module("act", m_act);
+
+    m_normalize_before = normalize_before;
+}
+
+
+//-------------------------------- End AIFIImpl -----------------------------
+
+RepC3Impl::RepC3Impl(int in_channels, int number, std::vector<arg_complex>& args)
+{
+    Init(in_channels, std::get<int>(args[0]), number);
+}
+
+torch::Tensor RepC3Impl::forward(torch::Tensor x)
+{
+    return cv3.forward(m->forward(cv1->forward(x)) + cv2->forward(x));
+}
+
+void RepC3Impl::Init(int c1, int c2, int n, float e)
+{
+    _out_channels = c2;
+    auto c_ = int(c2 * e);
+
+    cv1 = Conv(c1, c_, 1, 1);
+    cv2 = Conv(c1, c_, 1, 1);
+    for (int i = 0; i < n; i++)
+    {
+        m->push_back(*(RepConv(c_, c_)));
+    }
+    if (c_ = c2)
+        cv3 = std::make_shared<ConvImpl>(c_, c2, 1, 1);
+    else
+        cv3 = std::make_shared<torch::nn::IdentityImpl>();
+
+    register_module("cv1", cv1);
+    register_module("cv2", cv2);
+    register_module("cv3", cv3.ptr());
+    register_module("m", m);
+}

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <variant>
@@ -11,6 +11,29 @@ using arg_complex = std::variant<int, std::string, bool, float>;
 // define for yaml settings
 using VariantValue = std::variant<std::string, int, bool, float, std::vector<int>>;
 using VariantConfigs = std::unordered_map<std::string, VariantValue>;
+
+template<typename T>
+T getVariantValue(VariantConfigs* pargs, std::string key, T defValue) {
+    /*
+        if (pargs->count(key) == 0)
+            return defValue;
+
+        auto& value = pargs->at(key);
+        if constexpr (std::is_same_v<T, float>)
+            return std::holds_alternative<float>(value) ? std::get<float>(value) : defValue;
+        else if constexpr (std::is_same_v<T, bool>)
+            return std::holds_alternative<bool>(value) ? std::get<bool>(value) : defValue;
+        else if constexpr (std::is_same_v<T, int>)
+            return std::holds_alternative<int>(value) ? std::get<int>(value) : defValue;
+        else if constexpr (std::is_same_v<T, std::string>)
+            return std::holds_alternative<std::string>(value) ? std::get<std::string>(value) : defValue;
+        else
+        {
+            static_assert(always_false<T>::value_compare, "unsupport type");
+        }
+        */
+    return pargs->count(key) > 0 ? std::get<T>(pargs->at(key)) : defValue;
+}
 
 
 inline std::tuple<float, bool> ConvertToNumber(const std::string& str)

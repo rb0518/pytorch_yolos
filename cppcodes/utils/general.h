@@ -19,7 +19,6 @@ torch::Tensor bbox_iou(torch::Tensor box1_, torch::Tensor box2_, bool is_xywh= t
 
 torch::Tensor box_iou(const torch::Tensor & boxes1, const torch::Tensor & boxes2);    
 
-torch::Tensor segment2box(torch::Tensor& segments, int width, int height);
 std::vector<torch::Tensor> resample_segments(std::vector<torch::Tensor>& segments, int n = 1000);
 
 
